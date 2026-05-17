@@ -3,31 +3,39 @@
 Fixed sequential workflow:
 1. parse_params  — extract parameters from user request (LLM)
 2. load_csv      — read and cache the CSV data
-3. run_rcd       — execute RCD algorithm (if inject_time available)
-4. run_pc        — execute PC algorithm
-5. refine        — LLM synthesizes final report
+3. run_rcd       — execute IAF-RCL algorithm (if inject_time available)
+4. run_pc        — execute KE-FPC algorithm
+5. visualize_graph — build propagation topology HTML
+6. refine        — LLM synthesizes final report
 
 Each node writes AIMessage.tool_calls + ToolMessage pairs to the messages
 state so LangGraph Studio can visualize the tool execution in its trace view.
 
 Graph structure:
-START → parse_params → load_csv → run_rcd → run_pc → refine → END
+START → parse_params → load_csv → run_rcd → run_pc → visualize_graph → refine → END
 """
 
-from typing import Dict, Any, List, Optional, Union, TypedDict, Annotated
+from typing import Dict, Any, List, Optional, Union, TypedDict, Annotated, Sequence
 from langgraph.graph import StateGraph, END
+from langgraph.graph.ui import AnyUIMessage, ui_message_reducer
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage, ToolMessage, SystemMessage
 import pandas as pd
 import json
 import re
 import uuid
 
+from app.config.algorithm_names import ALGORITHM_IAF_RCL, ALGORITHM_KE_FPC
 from app.config.model_config import get_deepseek_llm
 from app.utils.logger import get_logger
 from app.utils.prompt_loader import load_prompt
 from app.utils.llm_logger import log_llm_conversation
 from app.tools.rcd_wrapper import run_rcd_analysis
 from app.tools.pc_wrapper import run_pc_analysis
+from app.tools.graph_visualization_tool import visualize_propagation_graph, get_topology_view_url
+from app.utils.topology_chat import (
+    build_final_report_messages,
+    format_propagation_path_line,
+)
 from app.utils.json_utils import sanitize_for_json
 from app.utils.path_resolver import resolve_data_path
 
@@ -46,6 +54,7 @@ def add_messages(left: List[BaseMessage], right: List[BaseMessage]) -> List[Base
 class DiagnoseAgentState(TypedDict, total=False):
     """State for sequential diagnose agent workflow"""
     messages: Annotated[List[BaseMessage], add_messages]
+    ui: Annotated[Sequence[AnyUIMessage], ui_message_reducer]
     task_description: str
     # Parsed parameters
     csv_file_path: Optional[str]
@@ -57,6 +66,7 @@ class DiagnoseAgentState(TypedDict, total=False):
     csv_headers: Optional[List[str]]
     rcd_result: Optional[Dict[str, Any]]
     pc_result: Optional[Dict[str, Any]]
+    graph_visualization: Optional[Dict[str, Any]]
     tool_errors: List[Dict[str, Any]]
     integrated_result: Optional[str]
 
@@ -352,7 +362,7 @@ def load_csv_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
 
 
 def run_rcd_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
-    """Run RCD algorithm if inject_time is available."""
+    """Run IAF-RCL algorithm if inject_time is available."""
     csv_path = state.get("csv_file_path", "")
     df = get_cached_csv(csv_path)
     inject_time = state.get("inject_time")
@@ -361,7 +371,7 @@ def run_rcd_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
         logger.info("DIAGNOSE: No inject_time, skipping RCD")
         state["messages"] = _make_tool_message("rcd_algorithm", {
             "success": False,
-            "error": "未提供 inject_time，跳过 RCD",
+            "error": f"未提供 inject_time，跳过 {ALGORITHM_IAF_RCL}",
             "args": {"inject_time": None}
         })
         return state
@@ -386,7 +396,7 @@ def run_rcd_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
             localized=True, bins=5, dataset=None, verbose=False,
             abnormal_kpi=abnormal_kpi, seed=42
         )
-        result["algorithm"] = "RCD"
+        result["algorithm"] = ALGORITHM_IAF_RCL
         result["success"] = True
         state["rcd_result"] = result
 
@@ -398,12 +408,12 @@ def run_rcd_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
             "args": {"inject_time": inject_time, "gamma": gamma, "abnormal_kpi": abnormal_kpi},
             "root_causes": root_causes[:10],
             "total_root_causes": len(root_causes),
-            "algorithm": "RCD",
+            "algorithm": ALGORITHM_IAF_RCL,
         })
 
     except Exception as e:
-        logger.error(f"DIAGNOSE: RCD failed: {e}")
-        state["rcd_result"] = {"algorithm": "RCD", "success": False, "error": str(e), "root_causes": []}
+        logger.error(f"DIAGNOSE: {ALGORITHM_IAF_RCL} failed: {e}")
+        state["rcd_result"] = {"algorithm": ALGORITHM_IAF_RCL, "success": False, "error": str(e), "root_causes": []}
         state["tool_errors"] = state.get("tool_errors", []) + [{"step": "rcd", "error": str(e)}]
         state["messages"] = _make_tool_message("rcd_algorithm", {
             "success": False,
@@ -415,7 +425,7 @@ def run_rcd_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
 
 
 def run_pc_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
-    """Run PC algorithm for causal discovery."""
+    """Run KE-FPC algorithm for causal discovery."""
     csv_path = state.get("csv_file_path", "")
     df = get_cached_csv(csv_path)
 
@@ -436,7 +446,7 @@ def run_pc_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
         result = run_pc_analysis(
             data=df, alpha=alpha, verbose=False, abnormal_kpi=abnormal_kpi
         )
-        result["algorithm"] = "PC"
+        result["algorithm"] = ALGORITHM_KE_FPC
         result["success"] = True
         state["pc_result"] = result
 
@@ -451,18 +461,63 @@ def run_pc_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
             "total_root_causes": len(rc),
             "edges": edges[:10],
             "total_edges": len(edges),
-            "algorithm": "PC",
+            "algorithm": ALGORITHM_KE_FPC,
         })
 
     except Exception as e:
-        logger.error(f"DIAGNOSE: PC failed: {e}")
-        state["pc_result"] = {"algorithm": "PC", "success": False, "error": str(e), "root_causes": [], "edges": []}
+        logger.error(f"DIAGNOSE: {ALGORITHM_KE_FPC} failed: {e}")
+        state["pc_result"] = {"algorithm": ALGORITHM_KE_FPC, "success": False, "error": str(e), "root_causes": [], "edges": []}
         state["tool_errors"] = state.get("tool_errors", []) + [{"step": "pc", "error": str(e)}]
         state["messages"] = _make_tool_message("pc_algorithm", {
             "success": False,
             "error": str(e),
             "args": {"alpha": alpha, "abnormal_kpi": abnormal_kpi},
         })
+
+    return state
+
+
+def visualize_graph_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
+    """Generate interactive HTML topology for KE-FPC propagation chains."""
+    pc_result = state.get("pc_result") or {}
+    edges = pc_result.get("edges") or []
+    root_causes = pc_result.get("root_causes") or []
+    abnormal_kpi = state.get("abnormal_kpi")
+
+    if not pc_result.get("success") or not edges:
+        logger.info("DIAGNOSE: Skip topology visualization (no KE-FPC edges)")
+        state["graph_visualization"] = {
+            "success": False,
+            "error": "无可用传播边，跳过拓扑图生成",
+        }
+        return state
+
+    logger.info(f"DIAGNOSE: Building propagation topology — {len(edges)} edges")
+    try:
+        viz = visualize_propagation_graph(
+            edges=edges,
+            root_causes=root_causes,
+            abnormal_kpi=abnormal_kpi,
+            output_format="html",
+            output_dir="outputs/graphs",
+        )
+        state["graph_visualization"] = viz
+
+        state["messages"] = _make_tool_message("graph_visualization_tool", {
+            "success": viz.get("success", False),
+            "args": {
+                "abnormal_kpi": abnormal_kpi,
+                "edge_count": len(viz.get("edges", [])),
+            },
+            "view_url": viz.get("view_url"),
+            "filepath": viz.get("filepath"),
+            "propagation_paths": (viz.get("propagation_paths") or [])[:5],
+        })
+        logger.info(f"DIAGNOSE: Topology ready at {viz.get('view_url')}")
+    except Exception as e:
+        logger.error(f"DIAGNOSE: Topology visualization failed: {e}")
+        state["graph_visualization"] = {"success": False, "error": str(e)}
+        state["tool_errors"] = state.get("tool_errors", []) + [{"step": "visualize", "error": str(e)}]
 
     return state
 
@@ -502,7 +557,7 @@ def refine_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
         parts.append(f"- 数值指标 ({len(num_cols)} 个): {', '.join(num_cols[:30])}")
 
     if rcd_result:
-        parts.append("\n## RCD 算法结果")
+        parts.append(f"\n## {ALGORITHM_IAF_RCL} 算法结果")
         if rcd_result.get("success"):
             rc = rcd_result.get("root_causes", [])
             parts.append(f"- 状态: 成功\n- 根因数量: {len(rc)}")
@@ -512,7 +567,7 @@ def refine_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
             parts.append(f"- 状态: 失败\n- 错误: {rcd_result.get('message', rcd_result.get('error', 'Unknown'))}")
 
     if pc_result:
-        parts.append("\n## PC 算法结果")
+        parts.append(f"\n## {ALGORITHM_KE_FPC} 算法结果")
         if pc_result.get("success"):
             rc = pc_result.get("root_causes", [])
             edges = pc_result.get("edges", [])
@@ -529,6 +584,19 @@ def refine_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
         for err in tool_errors:
             parts.append(f"- {err.get('step', 'unknown')}: {err.get('error', 'unknown')}")
 
+    graph_viz = state.get("graph_visualization")
+    if graph_viz and graph_viz.get("success"):
+        view_url = graph_viz.get("view_url") or get_topology_view_url()
+        parts.append("\n## 根因传播拓扑图")
+        parts.append(f"- 交互式拓扑: {view_url}")
+        paths = graph_viz.get("propagation_paths") or []
+        if paths:
+            parts.append(f"- 基于 {ALGORITHM_KE_FPC} 的传播路径（供你理解因果，勿在报告中重复列出）:")
+            for i, path in enumerate(paths[:15], 1):
+                parts.append(f"  - {format_propagation_path_line(i, path)}")
+    elif graph_viz and graph_viz.get("error"):
+        parts.append(f"\n## 根因传播拓扑图\n- 未生成: {graph_viz.get('error')}")
+
     result_str = "\n".join(parts)
 
     try:
@@ -536,7 +604,12 @@ def refine_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
         prompt = refine_prompt.replace("{{RESULT_STR}}", result_str)
     except Exception:
         if rcd_result or pc_result:
-            prompt = f"你是一个 AIOps 根因分析专家。基于以下分析结果生成报告：\n\n{result_str}\n\n请生成包含根因指标列表、故障传播路径、故障类型判断、结论与建议的结构化报告。"
+            prompt = (
+                f"你是一个 AIOps 根因分析专家。基于以下分析结果生成报告：\n\n{result_str}\n\n"
+                f"请生成包含根因指标列表、故障传播路径、故障类型判断、结论与建议的结构化报告。"
+                f"报告中算法名称必须使用 {ALGORITHM_IAF_RCL} 与 {ALGORITHM_KE_FPC}，"
+                f"不要使用 RCD、PC 作为算法名称。"
+            )
         else:
             prompt = f"未能成功执行任何根因分析算法。\n\n任务: {task_description}\n\n请说明问题并给出建议。"
 
@@ -563,8 +636,10 @@ def refine_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
         logger.error(f"DIAGNOSE: Refine failed: {e}")
         state["integrated_result"] = result_str + "\n\n注: LLM报告生成失败，以上为原始执行结果。"
 
-    # Write the final report as an AI message into messages for Studio display
-    state["messages"] = [AIMessage(content=state["integrated_result"])]
+    # Chat: 第1条=拓扑(Markdown路径+Mermaid+图片)，第2条=LLM分析(纯文本章节)
+    state["messages"] = build_final_report_messages(
+        state["integrated_result"], graph_viz
+    )
 
     logger.info("DIAGNOSE: Final report generated")
     return state
@@ -576,7 +651,7 @@ def build_diagnose_agent() -> StateGraph:
     """Build the diagnose agent with sequential workflow.
 
     Graph structure:
-    START → parse_params → load_csv → run_rcd → run_pc → refine → END
+    START → parse_params → load_csv → run_rcd → run_pc → visualize_graph → refine → END
     """
     logger.info("Building diagnose agent with sequential workflow")
 
@@ -586,13 +661,15 @@ def build_diagnose_agent() -> StateGraph:
     builder.add_node("load_csv", load_csv_node)
     builder.add_node("run_rcd", run_rcd_node)
     builder.add_node("run_pc", run_pc_node)
+    builder.add_node("visualize_graph", visualize_graph_node)
     builder.add_node("refine", refine_node)
 
     builder.set_entry_point("parse_params")
     builder.add_edge("parse_params", "load_csv")
     builder.add_edge("load_csv", "run_rcd")
     builder.add_edge("run_rcd", "run_pc")
-    builder.add_edge("run_pc", "refine")
+    builder.add_edge("run_pc", "visualize_graph")
+    builder.add_edge("visualize_graph", "refine")
     builder.add_edge("refine", END)
 
     graph = builder.compile()

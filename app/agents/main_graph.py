@@ -2,16 +2,18 @@
 
 This is the main graph that contains nested subgraphs:
 - supervisor_agent: Main orchestrator (expandable in Studio)
-- diagnose_agent: Sequential root cause analysis subagent (expandable in Studio)
+- diagnose_agent: ReAct loop root cause analysis subagent (expandable in Studio)
 
 The main graph handles routing between subgraphs based on state.
 """
 
-from typing import Dict, Any, List, Optional, Literal, TypedDict, Annotated
+from typing import Dict, Any, List, Optional, Literal, TypedDict, Annotated, Sequence
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END, add_messages
+from langgraph.graph.ui import AnyUIMessage, ui_message_reducer
 from app.agents.supervisor_agent import SupervisorAgentState, supervisor_agent as supervisor_subgraph
-from app.agents.diagnose_agent import DiagnoseAgentState, diagnose_agent as diagnose_subgraph
+from app.models.react_agent_state import ReactAgentState
+from app.agents.diagnose_agent import diagnose_agent as diagnose_subgraph
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,6 +36,7 @@ class MainState(TypedDict, total=False):
     """Main graph state with proper add_messages reducer for Studio compatibility."""
     user_input: str
     messages: Annotated[List[BaseMessage], add_messages]
+    ui: Annotated[Sequence[AnyUIMessage], ui_message_reducer]
     continue_conversation: bool
     action: str
     csv_file_path: Optional[str]
@@ -79,7 +82,7 @@ def state_from_supervisor(main_state: MainState, supervisor_state: SupervisorAge
     return main_state
 
 
-def state_to_diagnose(state: MainState) -> DiagnoseAgentState:
+def state_to_diagnose(state: MainState) -> ReactAgentState:
     """Convert main state to diagnose state."""
     task = state.get("user_input", "")
     if not task:
@@ -91,16 +94,17 @@ def state_to_diagnose(state: MainState) -> DiagnoseAgentState:
     return {
         "messages": [],
         "task_description": task,
-        "csv_file_path": None,
-        "inject_time": None,
-        "abnormal_kpi": None,
+        "csv_file_path": state.get("csv_file_path"),
+        "inject_time": state.get("inject_time"),
+        "abnormal_kpi": state.get("abnormal_kpi"),
+        "gamma": state.get("gamma", 5),
+        "alpha": state.get("alpha", 0.05),
         "csv_headers": None,
         "rcd_result": None,
         "pc_result": None,
-        "integrated_result": None,
+        "graph_visualization": None,
         "tool_errors": [],
-        "gamma": 5,
-        "alpha": 0.05
+        "integrated_result": None,
     }
 
 
@@ -123,10 +127,15 @@ def supervisor_node(state: MainState) -> MainState:
     result = supervisor_subgraph.invoke(supervisor_state)
     state = state_from_supervisor(state, result)
 
-    # Append only new AIMessages produced by the supervisor
-    for msg in result.get("messages", []):
-        if isinstance(msg, AIMessage) and getattr(msg, "id", None) not in existing_ids:
-            state["messages"] = [msg]
+    new_ai = [
+        m for m in result.get("messages", [])
+        if isinstance(m, AIMessage)
+        and m.content
+        and getattr(m, "id", None) not in existing_ids
+    ]
+    if new_ai:
+        state["messages"] = state.get("messages", []) + new_ai
+        logger.info(f"MAIN: Appended {len(new_ai)} supervisor message(s) to chat")
 
     logger.info(f"MAIN: Supervisor completed, action={state.get('action')}")
     return state
@@ -145,9 +154,30 @@ def diagnose_node(state: MainState) -> MainState:
     logger.info(f"MAIN: Diagnose — user_input='{str(state.get('user_input', ''))[:80]}'")
 
     diagnose_state = state_to_diagnose(state)
+
     result = diagnose_subgraph.invoke(diagnose_state)
 
+    # Log the diagnose result for debugging
+    logger.info(f"MAIN: Diagnose result keys: {result.keys() if isinstance(result, dict) else 'not a dict'}")
+    logger.info(f"MAIN: Diagnose final_response: {result.get('final_response', 'None')[:200] if result.get('final_response') else 'None'}")
+    logger.info(f"MAIN: Diagnose messages count: {len(result.get('messages', []))}")
+
+    # Store the full result
     state["diagnose_result"] = result
+
+    # Extract results to main state for supervisor access
+    if result.get("csv_file_path"):
+        state["csv_file_path"] = result["csv_file_path"]
+    if result.get("inject_time"):
+        state["inject_time"] = result["inject_time"]
+    if result.get("abnormal_kpi"):
+        state["abnormal_kpi"] = result["abnormal_kpi"]
+    if result.get("gamma"):
+        state["gamma"] = result["gamma"]
+    if result.get("alpha"):
+        state["alpha"] = result["alpha"]
+
+    # Chat 回复由 supervisor 写入 messages（含拓扑图），此处仅保存结果
     state["action"] = "have_diagnose_result"
 
     logger.info("MAIN: Diagnose completed, will return to supervisor")

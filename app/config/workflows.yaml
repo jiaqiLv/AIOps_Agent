@@ -1,23 +1,56 @@
+# Workflow Definitions for LangGraph Agents
+#
+# This file defines reusable workflow patterns that can be configured via agents.yaml
+
 workflows:
+  # ============================================
+  # ReAct Tool Loop - LLM-driven tool invocation
+  # ============================================
   react_tool_loop:
-    graph_builder: app.graph.agent_loop.build_react_tool_loop
+    description: "ReAct 循环，LLM 自主决策工具调用"
+    type: "react_loop"
+
+    # Graph structure definition
     nodes:
-      - model_node
-      - tool_validation_node
-      - tool_node
-      - human_interrupt_node
-      - final_response_node
+      model_node:
+        type: llm_with_tools
+        description: "LLM 决定下一步行动（调用工具或生成最终响应）"
+
+      tool_node:
+        type: tool_execution
+        description: "执行 LLM 选定的工具"
+
+      extract_results_node:
+        type: result_extraction
+        description: "解析工具输出，更新状态，检测中断请求"
+
+      final_response_node:
+        type: llm_synthesis
+        description: "综合所有结果生成最终报告"
+
+    # Edge routing definition
     edges:
       start: model_node
+
+      # From model_node: route based on tool_calls presence
       model_node:
-        tool_call: tool_validation_node
-        final: final_response_node
-      tool_validation_node:
-        valid: tool_node
-        invalid: human_interrupt_node
-      tool_node:
-        next: model_node
-      human_interrupt_node:
-        next: interrupt
-      final_response_node:
-        next: end
+        has_tool_calls: tool_node
+        no_tool_calls: final_response_node
+        max_iterations_reached: final_response_node
+
+      # From tool_node: always extract results
+      tool_node: extract_results_node
+
+      # From extract_results_node: route based on interrupt/continuation
+      extract_results_node:
+        requires_user_input: interrupt  # Trigger LangGraph interrupt
+        continue: model_node            # Loop back for another iteration
+        complete: final_response_node   # All done, generate final response
+
+      # From final_response_node: end
+      final_response_node: end
+
+    # Routing conditions (Python paths to functions)
+    routing_conditions:
+      after_model: "app.agents.nodes.react_nodes.route_after_model"
+      after_extract: "app.agents.nodes.react_nodes.route_after_extract"

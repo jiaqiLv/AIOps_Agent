@@ -1,12 +1,10 @@
-"""RCD (Root Cause Discovery) algorithm wrapper tool
-
-This tool wraps the RCD algorithm for root cause analysis.
-"""
+"""IAF-RCL algorithm wrapper tool (implementation: app/tools/rcd/)."""
 
 from typing import Dict, Any, List, Optional
 import pandas as pd
 import numpy as np
 
+from app.config.algorithm_names import ALGORITHM_IAF_RCL
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -48,7 +46,7 @@ def run_rcd_analysis(
     abnormal_kpi: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Run RCD algorithm for root cause analysis.
+    Run IAF-RCL algorithm for root cause analysis.
 
     Args:
         data: DataFrame with time series data (must include 'time' column as 10-digit timestamp)
@@ -77,7 +75,7 @@ def run_rcd_analysis(
         return {
             "root_causes": [],
             "status": "error",
-            "message": "RCD algorithm not available. Please ensure required dependencies are installed."
+            "message": f"{ALGORITHM_IAF_RCL} algorithm not available. Please ensure required dependencies are installed."
         }
 
     try:
@@ -88,7 +86,7 @@ def run_rcd_analysis(
             return {
                 "root_causes": [],
                 "status": "error",
-                "message": "CSV data must contain 'time' column for RCD analysis"
+                "message": f"CSV data must contain 'time' column for {ALGORITHM_IAF_RCL} analysis"
             }
 
         # Log time information for debugging
@@ -176,7 +174,7 @@ def run_rcd_analysis(
         response = {
             "root_causes": root_causes,
             "status": "success",
-            "message": f"RCD analysis completed successfully. Found {len(root_causes)} potential root causes."
+            "message": f"{ALGORITHM_IAF_RCL} analysis completed successfully. Found {len(root_causes)} potential root causes."
         }
 
         if abnormal_kpi:
@@ -189,13 +187,13 @@ def run_rcd_analysis(
         return {
             "root_causes": [],
             "status": "error",
-            "message": f"RCD analysis failed: {str(e)}"
+            "message": f"{ALGORITHM_IAF_RCL} analysis failed: {str(e)}"
         }
 
 
 def format_rcd_results(result: Dict[str, Any]) -> str:
     """
-    Format RCD results for display.
+    Format IAF-RCL results for display.
 
     Args:
         result: Result dictionary from run_rcd_analysis
@@ -204,14 +202,14 @@ def format_rcd_results(result: Dict[str, Any]) -> str:
         Formatted string with results
     """
     if result.get("status") == "error":
-        return f"❌ RCD Analysis Error: {result.get('message')}"
+        return f"❌ {ALGORITHM_IAF_RCL} Analysis Error: {result.get('message')}"
 
     root_causes = result.get("root_causes", [])
 
     if not root_causes:
-        return "⚠️ RCD Analysis: No root causes identified."
+        return f"⚠️ {ALGORITHM_IAF_RCL} Analysis: No root causes identified."
 
-    output = ["=== RCD 根因分析结果 ===\n"]
+    output = [f"=== {ALGORITHM_IAF_RCL} 根因分析结果 ===\n"]
     output.append(f"📊 分析状态: {result.get('status', 'unknown')}")
     output.append(f"🔍 发现根因数量: {len(root_causes)}\n")
 

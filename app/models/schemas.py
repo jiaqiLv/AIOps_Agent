@@ -21,14 +21,14 @@ class CsvReaderResult(BaseModel):
 
 
 class RcdInput(BaseModel):
-    """Input schema for RCD tool"""
+    """Input schema for rcd_tool (IAF-RCL algorithm)"""
     data_path: str = Field(..., description="Path to CSV data file")
     fault_injection_time: str = Field(..., description="Fault injection time")
     config: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
 class PcInput(BaseModel):
-    """Input schema for PC tool"""
+    """Input schema for pc_tool (KE-FPC algorithm)"""
     data_path: str = Field(..., description="Path to CSV data file")
     abnormal_kpi: str = Field(..., description="Abnormal KPI metric name")
     config: Optional[Dict[str, Any]] = Field(default_factory=dict)

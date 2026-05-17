@@ -36,6 +36,10 @@ class Settings(BaseSettings):
 
     # LangGraph
     LANGGRAPH_DEBUG: bool = os.getenv("LANGGRAPH_DEBUG", "true").lower() == "true"
+    LANGGRAPH_PUBLIC_BASE_URL: str = os.getenv(
+        "LANGGRAPH_PUBLIC_BASE_URL", "http://127.0.0.1:2024"
+    )
+    GRAPH_OUTPUT_DIR: str = os.getenv("GRAPH_OUTPUT_DIR", "outputs/graphs")
 
     # MCP Tools (reserved for future implementation)
     RCD_MCP_SERVER_URL: str = os.getenv("RCD_MCP_SERVER_URL", "http://localhost:8001")

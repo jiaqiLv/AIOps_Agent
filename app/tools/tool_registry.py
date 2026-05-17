@@ -5,6 +5,7 @@ import importlib
 from typing import Any, Dict, List, Optional, Callable
 from app.utils.logger import get_logger
 from app.utils.json_utils import from_json_file
+from app.utils.path_resolver import resolve_config_path
 
 logger = get_logger(__name__)
 
@@ -27,7 +28,8 @@ class ToolRegistry:
         Args:
             tools_config_path: Path to the tools configuration YAML file
         """
-        self.tools_config_path = tools_config_path
+        # Resolve config path relative to project root
+        self.tools_config_path = resolve_config_path(tools_config_path)
         self.tools: Dict[str, Dict[str, Any]] = {}
         self._loaded = False
 
@@ -73,14 +75,14 @@ class ToolRegistry:
             },
             "rcd_tool": {
                 "name": "rcd_tool",
-                "description": "Run RCD algorithm for root cause analysis",
+                "description": "Run IAF-RCL algorithm for root cause analysis",
                 "module": "app.tools.rcd_wrapper",
                 "function": "run_rcd_analysis",
                 "required_fields": ["data", "inject_time"]
             },
             "pc_tool": {
                 "name": "pc_tool",
-                "description": "Run PC algorithm for causal discovery",
+                "description": "Run KE-FPC algorithm for causal discovery",
                 "module": "app.tools.pc_wrapper",
                 "function": "run_pc_analysis",
                 "required_fields": ["data"]
@@ -237,6 +239,22 @@ class ToolRegistry:
         if tool_name in self.tools:
             return self.tools[tool_name].get("description", "")
         return ""
+
+    def get_langchain_tools(self, tool_names: List[str]) -> List:
+        """
+        Get LangChain StructuredTool instances for a list of tool names.
+
+        This method creates LangChain-compatible tools that can be used with
+        LangChain's ToolNode and bind_tools().
+
+        Args:
+            tool_names: List of tool names to convert
+
+        Returns:
+            List of LangChain StructuredTool instances
+        """
+        from app.tools.langchain_tool_adapters import create_langchain_tools
+        return create_langchain_tools(tool_names, self)
 
 
 # Global tool registry instance

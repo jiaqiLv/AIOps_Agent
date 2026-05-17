@@ -20,19 +20,24 @@ agents:
 
   diagnose:
     name: diagnose
-    type: diagnose_agent
-    workflow: sequential
-    state_schema: app.agents.diagnose_agent.DiagnoseAgentState
+    type: react_agent
+    workflow: react_tool_loop
+    state_schema: app.models.react_agent_state.ReactAgentState
     system_prompt: app/prompts/diagnose_system.md
     refine_prompt: app/prompts/diagnose_refine.md
+    params_config: app/config/params.yaml
     tools:
       - csv_reader_tool
       - rcd_tool
       - pc_tool
+      - graph_visualization_tool
+      - ask_user
     model:
       provider: deepseek
       name: deepseek-chat
       temperature: 0
     max_iterations: 10
     human_in_the_loop:
-      enabled: false
+      enabled: true
+      interrupt_on:
+        - missing_required_tool_arguments

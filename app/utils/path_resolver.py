@@ -6,6 +6,51 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Cache the project root to avoid repeated calculations
+_project_root = None
+
+
+def get_project_root() -> str:
+    """
+    Get the project root directory.
+
+    The project root is the parent directory of the 'app' folder.
+
+    Returns:
+        Absolute path to the project root directory
+    """
+    global _project_root
+    if _project_root is None:
+        # Get the directory containing this file (app/utils/)
+        # Go up two levels to get to the project root
+        _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return _project_root
+
+
+def resolve_config_path(config_path: str) -> str:
+    """
+    Resolve a config file path relative to the project root.
+
+    Args:
+        config_path: Path to config file (can be relative or absolute)
+
+    Returns:
+        Absolute path to the config file
+    """
+    if os.path.isabs(config_path):
+        return config_path
+
+    # Resolve relative to project root
+    project_root = get_project_root()
+    full_path = os.path.join(project_root, config_path)
+
+    if os.path.exists(full_path):
+        return full_path
+
+    # If not found, return the full path anyway (will error later with better message)
+    logger.warning(f"Config path does not exist: {full_path}")
+    return full_path
+
 
 def resolve_data_path(
     data_path: Optional[str] = None,

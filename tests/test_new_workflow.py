@@ -205,7 +205,7 @@ class TestToolErrorHandling:
         result_dict = json.loads(result)
 
         # Should return error result
-        assert result_dict["algorithm"] == "RCD"
+        assert result_dict["algorithm"] == "IAF-RCL"
         assert result_dict["success"] == False
         assert "error" in result_dict
 

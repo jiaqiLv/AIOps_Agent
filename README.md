@@ -9,6 +9,7 @@ AIOps 故障诊断 Agent 原型系统，基于 Supervisor-Subagent 架构。
 - **CSV 文件读取**: 通过 LLM Tool Calling 自动调用 CSV 读取工具
 - **DeepSeek LLM 集成**: 使用 DeepSeek 作为默认 LLM（支持切换其他模型）
 - **LangGraph 工作流**: 使用 LangGraph 编排复杂的 Agent 工作流
+- **根因算法**: IAF-RCL（快速根因推理，`rcd_tool`）与 KE-FPC（因果发现，`pc_tool`）
 
 ## 架构说明
 
@@ -141,8 +142,8 @@ app/
 ├── tools/
 │   ├── langchain_csv_tool.py # LangChain 格式的 CSV 工具
 │   ├── csv_reader_tool.py    # 传统 CSV 工具
-│   ├── rcd_tool.py           # RCD 算法（占位）
-│   └── pc_tool.py            # PC 算法（占位）
+│   ├── rcd_wrapper.py        # IAF-RCL 算法封装
+│   └── pc_wrapper.py         # KE-FPC 算法封装
 │
 ├── models/
 │   ├── base.py               # LLM 基础接口
@@ -190,8 +191,8 @@ langgraph dev
 
 ## 后续计划
 
-- [ ] 实现 RCD 算法工具
-- [ ] 实现 PC 算法工具
+- [x] 实现 IAF-RCL 算法工具（rcd_tool）
+- [x] 实现 KE-FPC 算法工具（pc_tool）
 - [ ] 增强 Supervisor 的意图识别
 - [ ] 支持多服务关联分析
 - [ ] 添加更多诊断 Subagent

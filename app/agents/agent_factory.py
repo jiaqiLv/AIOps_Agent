@@ -2,12 +2,21 @@
 
 import os
 import importlib
+import json
 from typing import Any, Dict, Optional, List
 from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
+from langchain_core.messages import SystemMessage
 
 from app.utils.logger import get_logger
 from app.utils.prompt_loader import load_prompt
+from app.utils.path_resolver import resolve_config_path
 from app.tools.tool_registry import ToolRegistry
+from app.tools.langchain_tool_adapters import create_diagnose_tools
+from app.utils.tool_prompt_generator import inject_tools_into_prompt, generate_diagnose_agent_tools_prompt
+
+
+logger = get_logger(__name__)
 
 
 class AgentFactory:
@@ -33,8 +42,14 @@ class AgentFactory:
             agents_config_path: Path to the agents configuration YAML file
             tool_registry: Tool registry instance (creates default if None)
         """
-        self.agents_config_path = agents_config_path
+        # Resolve config path relative to project root
+        self.agents_config_path = resolve_config_path(agents_config_path)
         self.tool_registry = tool_registry or ToolRegistry()
+
+        # Ensure tools are loaded
+        if not self.tool_registry._loaded:
+            self.tool_registry.load_tools()
+
         self.agents_config: Dict[str, Any] = {}
 
         # Load configurations
@@ -51,12 +66,14 @@ class AgentFactory:
             logger.info(f"Loaded agent config from {self.agents_config_path}")
 
         except FileNotFoundError:
-            logger.error(f"Agents config file not found: {self.agents_config_path}")
+            logger.warning(f"Agents config file not found: {self.agents_config_path}, using fallback")
+            self._load_fallback_config()
         except ImportError:
             logger.warning("PyYAML not installed, using fallback agent config")
             self._load_fallback_config()
         except Exception as e:
-            logger.error(f"Error loading agent config: {e}")
+            logger.error(f"Error loading agent config: {e}, using fallback config")
+            self._load_fallback_config()
 
     def _load_fallback_config(self) -> None:
         """Load fallback agent configuration"""
@@ -65,16 +82,18 @@ class AgentFactory:
                 "supervisor": {
                     "name": "supervisor",
                     "type": "supervisor_agent",
+                    "state_schema": "app.models.supervisor_state.SupervisorState",
                     "system_prompt": "app/prompts/supervisor_system.md",
                     "tools": ["diagnose_subagent", "ask_user"],
                     "max_iterations": 8
                 },
                 "diagnose": {
                     "name": "diagnose",
-                    "type": "diagnose_agent",
+                    "type": "react_agent",
+                    "state_schema": "app.models.react_agent_state.ReactAgentState",
                     "system_prompt": "app/prompts/diagnose_system.md",
                     "refine_prompt": "app/prompts/diagnose_refine.md",
-                    "tools": ["csv_reader_tool", "rcd_tool", "pc_tool"],
+                    "tools": ["csv_reader_tool", "rcd_tool", "pc_tool", "graph_visualization_tool", "ask_user"],
                     "max_iterations": 10
                 }
             }
@@ -105,7 +124,7 @@ class AgentFactory:
             # Build graph
             if agent_config.get("type") == "supervisor_agent":
                 graph = self._build_supervisor_agent(agent_config, state_schema_class)
-            elif agent_config.get("type") == "diagnose_agent":
+            elif agent_config.get("type") in ("diagnose_agent", "react_agent"):
                 graph = self._build_diagnose_agent(agent_config, state_schema_class)
             else:
                 logger.error(f"Unknown agent type: {agent_config.get('type')}")
@@ -147,31 +166,104 @@ class AgentFactory:
         return builder.compile()
 
     def _build_diagnose_agent(self, config: Dict[str, Any], state_schema: type) -> StateGraph:
-        """Build diagnose agent graph (sequential workflow)"""
-        from app.agents.diagnose_agent import (
-            parse_params_node,
-            load_csv_node,
-            run_rcd_node,
-            run_pc_node,
-            refine_node,
+        """Build diagnose agent graph using prompt-based ReAct loop workflow."""
+        from app.agents.nodes.prompt_based_react import (
+            create_prompt_based_model_node,
+            create_prompt_based_route_function,
+        )
+        from app.agents.nodes.react_nodes import extract_results_node, create_final_response_node
+        from app.config.model_config import get_llm
+
+        # Load configuration
+        system_prompt_path = config.get("system_prompt", "app/prompts/diagnose_system.md")
+        refine_prompt_path = config.get("refine_prompt", "app/prompts/diagnose_refine.md")
+        model_config = config.get("model", {})
+        max_iterations = config.get("max_iterations", 10)
+
+        # Load base system prompt (without tools - tools will be injected)
+        base_system_prompt = self._load_system_prompt(system_prompt_path)
+
+        # Create LLM (without binding tools)
+        llm = get_llm(
+            provider=model_config.get("provider", "deepseek"),
+            model_name=model_config.get("name", "deepseek-chat"),
+            temperature=model_config.get("temperature", 0)
         )
 
+        # Get LangChain tools
+        tools = create_diagnose_tools(self.tool_registry)
+
+        if not tools:
+            logger.error("No tools were created! Check tool_registry configuration.")
+            # Fallback: create minimal tools
+            from langchain_core.tools import StructuredTool
+            from pydantic import Field
+
+            def dummy_csv_reader(data_path: str = Field(..., description="CSV file path")) -> str:
+                return json.dumps({"error": "Tool not properly configured"}, ensure_ascii=False)
+
+            tools = [StructuredTool.from_function(
+                func=dummy_csv_reader,
+                name="csv_reader_tool",
+                description="Read CSV data (fallback)",
+            )]
+
+        logger.info(f"Created {len(tools)} tools for prompt-based ReAct: {[t.name for t in tools]}")
+
+        # Get the underlying LangChain client for direct invocation
+        if hasattr(llm, 'get_client'):
+            llm_client = llm.get_client()
+            logger.info("Using underlying LangChain client for prompt-based ReAct")
+        else:
+            llm_client = llm
+            logger.info("Using LLM wrapper directly for prompt-based ReAct")
+
+        # Build graph
         builder = StateGraph(state_schema)
 
-        builder.add_node("parse_params", parse_params_node)
-        builder.add_node("load_csv", load_csv_node)
-        builder.add_node("run_rcd", run_rcd_node)
-        builder.add_node("run_pc", run_pc_node)
-        builder.add_node("refine", refine_node)
+        # Create prompt-based model node (tools description in prompt)
+        model_node = create_prompt_based_model_node(
+            llm=llm_client,
+            tools=tools,
+            system_prompt=base_system_prompt
+        )
 
-        builder.set_entry_point("parse_params")
-        builder.add_edge("parse_params", "load_csv")
-        builder.add_edge("load_csv", "run_rcd")
-        builder.add_edge("run_rcd", "run_pc")
-        builder.add_edge("run_pc", "refine")
-        builder.add_edge("refine", END)
+        # Add nodes
+        builder.add_node("model_node", model_node)
+        builder.add_node("extract_results_node", extract_results_node)
+        builder.add_node("final_response_node", create_final_response_node(refine_prompt_path, llm))
 
-        return builder.compile()
+        # Set entry point
+        builder.set_entry_point("model_node")
+
+        # Create routing function
+        route_function = create_prompt_based_route_function()
+
+        # Add conditional edges
+        builder.add_conditional_edges(
+            "model_node",
+            route_function,
+            {
+                "tools": "extract_results_node",  # After tool call, extract results
+                "model": "model_node",  # Try again (first iteration no tools)
+                "final": "final_response_node"  # Done
+            }
+        )
+
+        builder.add_conditional_edges(
+            "extract_results_node",
+            lambda state: "model" if not state.get("final_response") else "final",
+            {
+                "model": "model_node",
+                "final": "final_response_node"
+            }
+        )
+
+        builder.add_edge("final_response_node", END)
+
+        graph = builder.compile()
+        logger.info("Diagnose agent built with prompt-based ReAct loop workflow")
+        return graph
 
     def get_agent_config(self, agent_name: str) -> Optional[Dict[str, Any]]:
         """Get configuration for a specific agent"""

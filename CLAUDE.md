@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AIOps Agent is a conversational root cause analysis system for microservice anomalies. It uses a Supervisor-Agent architecture with LangGraph workflows to analyze metrics data using RCD (Root Cause Discovery) and PC (Peter-Clark) causal discovery algorithms.
+AIOps Agent is a conversational root cause analysis system for microservice anomalies. It uses a Supervisor-Agent architecture with LangGraph workflows to analyze metrics data using IAF-RCL and KE-FPC causal discovery algorithms (wrapped as `rcd_tool` and `pc_tool`).
 
 ## Running the Application
 
@@ -90,13 +90,13 @@ START → model (LLM) ──有 tool_calls──→ tools (ToolNode) → extract
 
 ### Algorithm Wrappers
 
-**RCD Wrapper** (`app/tools/rcd_wrapper.py`)
-- Wraps the RCD algorithm from `app/tools/rcd/`
+**IAF-RCL Wrapper** (`app/tools/rcd_wrapper.py`)
+- Wraps the IAF-RCL implementation from `app/tools/rcd/`
 - Parameters: inject_time (required), gamma (default: 5)
 - Returns ranked list of root cause metrics
 
-**PC Wrapper** (`app/tools/pc_wrapper.py`)
-- Wraps causal-learn PC algorithm with correlation fallback
+**KE-FPC Wrapper** (`app/tools/pc_wrapper.py`)
+- Wraps KE-FPC causal discovery (causal-learn PC backend) with correlation fallback
 - Parameters: alpha (default: 0.05)
 - Returns root causes and causal graph edges
 - Falls back to correlation-based analysis if causal-learn unavailable
@@ -214,7 +214,7 @@ Tests are located in `tests/`:
 
 ## Troubleshooting
 
-**RCD/PC algorithms not working**
+**IAF-RCL/KE-FPC algorithms not working**
 - Check `app/tools/rcd/` and ensure dependencies are installed
 - Verify causal-learn is available: `pip show causal-learn`
 

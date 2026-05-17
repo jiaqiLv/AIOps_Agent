@@ -53,7 +53,7 @@ class SupervisorAgentState(TypedDict, total=False):
 DIAGNOSIS_KEYWORDS = [
     "异常事件", "故障注入", "根因分析", "根因定位", "故障诊断",
     "帮我分析", "请分析", "分析根因", "分析故障", "分析异常",
-    "rcd算法", "pc算法", "因果发现", "故障传播",
+    "rcd算法", "pc算法", "iaf-rcl", "ke-fpc", "因果发现", "故障传播",
     "root cause", "diagnose anomaly",
 ]
 
@@ -110,7 +110,11 @@ def supervisor_llm_node(state: SupervisorAgentState) -> SupervisorAgentState:
         if not integrated_result:
             integrated_result = "根因分析已完成。"
 
-        state["messages"] = [AIMessage(content=integrated_result)]
+        diagnose_ai = [
+            m for m in (diagnose_result.get("messages") or [])
+            if isinstance(m, AIMessage) and m.content
+        ]
+        state["messages"] = diagnose_ai if diagnose_ai else [AIMessage(content=integrated_result)]
         state["diagnose_result"] = None
         state["continue_conversation"] = True
         state["action"] = "respond"
@@ -157,7 +161,7 @@ def supervisor_llm_node(state: SupervisorAgentState) -> SupervisorAgentState:
 - 指标数据分析
 - 故障根因定位
 - 根因诊断
-- 使用 RCD/PC 算法
+- 使用 IAF-RCL/KE-FPC 算法
 - 故障传播图生成
 - **或者用户输入包含大量日志输出、技术术语或之前诊断结果的片段**（这表示用户在继续或询问之前的诊断工作）
 
@@ -215,7 +219,7 @@ def supervisor_llm_node(state: SupervisorAgentState) -> SupervisorAgentState:
 - 分析微服务异常事件的根因
 - 分析指标数据，定位故障源头
 - 生成故障传播图
-- 使用 RCD 和 PC 算法进行综合诊断
+- 使用 IAF-RCL 和 KE-FPC 算法进行综合诊断
 
 请描述您的异常事件或提供数据文件，我将为您进行根因分析。
 

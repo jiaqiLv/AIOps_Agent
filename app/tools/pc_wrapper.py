@@ -1,7 +1,4 @@
-"""PC (Peter-Clark) algorithm wrapper tool
-
-This tool wraps the PC algorithm for causal discovery and root cause analysis.
-"""
+"""KE-FPC algorithm wrapper tool (causal discovery via causal-learn PC)."""
 
 import sys
 import os
@@ -10,6 +7,7 @@ import pandas as pd
 import numpy as np
 import networkx as nx
 
+from app.config.algorithm_names import ALGORITHM_KE_FPC
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -35,7 +33,7 @@ def run_pc_analysis(
     abnormal_kpi: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Run PC algorithm for causal discovery and root cause analysis.
+    Run KE-FPC algorithm for causal discovery and root cause analysis.
 
     Args:
         data: DataFrame with time series metrics (time column is 10-digit timestamp)
@@ -196,7 +194,7 @@ def run_pc_analysis(
                     "causal_graph": causal_graph,
                     "edges": causal_edges,
                     "status": "success",
-                    "message": f"PC analysis completed. Found {len(root_cause_names)} root causes and {len(causal_edges)} causal relationships."
+                    "message": f"{ALGORITHM_KE_FPC} analysis completed. Found {len(root_cause_names)} root causes and {len(causal_edges)} causal relationships."
                 }
 
                 if abnormal_kpi:
@@ -279,7 +277,7 @@ def run_pc_analysis(
             "causal_graph": causal_graph,
             "edges": edges,
             "status": "success",
-            "message": f"PC analysis (correlation fallback) completed. Found {len(root_causes)} potential root causes and {len(edges)} causal relationships."
+            "message": f"{ALGORITHM_KE_FPC} analysis (correlation fallback) completed. Found {len(root_causes)} potential root causes and {len(edges)} causal relationships."
         }
 
         if abnormal_kpi:
@@ -294,13 +292,13 @@ def run_pc_analysis(
             "causal_graph": {},
             "edges": [],
             "status": "error",
-            "message": f"PC analysis failed: {str(e)}"
+            "message": f"{ALGORITHM_KE_FPC} analysis failed: {str(e)}"
         }
 
 
 def format_pc_results(result: Dict[str, Any]) -> str:
     """
-    Format PC results for display.
+    Format KE-FPC results for display.
 
     Args:
         result: Result dictionary from run_pc_analysis
@@ -309,13 +307,13 @@ def format_pc_results(result: Dict[str, Any]) -> str:
         Formatted string with results
     """
     if result.get("status") == "error":
-        return f"❌ PC Analysis Error: {result.get('message')}"
+        return f"❌ {ALGORITHM_KE_FPC} Analysis Error: {result.get('message')}"
 
     root_causes = result.get("root_causes", [])
     causal_graph = result.get("causal_graph", {})
     edges = result.get("edges", [])
 
-    output = ["=== PC 因果发现分析结果 ===\n"]
+    output = [f"=== {ALGORITHM_KE_FPC} 因果发现分析结果 ===\n"]
     output.append(f"📊 分析状态: {result.get('status', 'unknown')}")
     output.append(f"🔍 发现根因数量: {len(root_causes)}")
     output.append(f"🔗 因果关系数量: {len(edges)}\n")

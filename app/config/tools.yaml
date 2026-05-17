@@ -21,7 +21,7 @@ tools:
 
   rcd_tool:
     name: rcd_tool
-    description: 调用 RCD 快速根因推理算法，基于故障注入时间识别候选根因指标
+    description: 调用 IAF-RCL 快速根因推理算法，基于故障注入时间识别候选根因指标
     module: app.tools.rcd_wrapper
     function: run_rcd_analysis
     args_schema: RcdInput
@@ -32,10 +32,21 @@ tools:
 
   pc_tool:
     name: pc_tool
-    description: 调用 PC 算法进行根因推理和故障传播图建模，基于异常 KPI 指标进行因果发现
+    description: 调用 KE-FPC 算法进行根因推理和故障传播图建模，基于异常 KPI 指标进行因果发现
     module: app.tools.pc_wrapper
     function: run_pc_analysis
     args_schema: PcInput
     return_schema: AlgorithmResult
     required_fields:
       - data
+
+  graph_visualization_tool:
+    name: graph_visualization_tool
+    description: 生成故障传播图的可视化展示，用不同颜色区分KPI节点和根因节点
+    module: app.tools.graph_visualization_tool
+    function: visualize_propagation_graph
+    args_schema: GraphVisualizationInput
+    return_schema: GraphVisualizationResult
+    required_fields:
+      - edges
+      - root_causes

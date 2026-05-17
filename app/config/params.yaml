@@ -1,0 +1,68 @@
+# Algorithm Parameters Configuration
+#
+# This file defines default parameters for algorithms used by tools.
+# These defaults can be overridden by tool arguments at runtime.
+
+algorithms:
+  # ============================================
+  # IAF-RCL Algorithm Parameters (rcd_tool)
+  # ============================================
+  rcd:
+    description: "IAF-RCL root cause inference algorithm parameters"
+
+    # Core IAF-RCL parameters
+    gamma: 5
+    localized: true
+    bins: 5
+    dk_select_useful: false
+
+    # Optional parameters
+    dataset: null  # Dataset type (null for auto-detection)
+    seed: 42       # Random seed for reproducibility
+
+  # ============================================
+  # KE-FPC Algorithm Parameters (pc_tool)
+  # ============================================
+  pc:
+    description: "KE-FPC causal discovery algorithm parameters"
+
+    # Independence test parameters
+    alpha: 0.05
+    independent_test_method: "fisherz"
+
+    # Graph parameters
+    max_path_length: -1  # -1 for unlimited
+
+    # Time lag parameters
+    enable_time_lag: true
+    max_lag: 5
+
+    # Optional parameters
+    stable: true         # Run stable KE-FPC algorithm (order independent)
+
+  # ============================================
+  # PCMCI Algorithm Parameters (Future)
+  # ============================================
+  pcmci:
+    description: "PCMCI algorithm for time-series causal discovery"
+
+    alpha: 0.05
+    pc_alpha: 0.05
+    tau_min: 0
+    tau_max: 5
+    max_conds_dim: null
+
+  # ============================================
+  # CSV Reader Parameters
+  # ============================================
+  csv_reader:
+    description: "CSV data loading parameters"
+
+    # Time column handling
+    normalize_time: true  # Convert datetime to Unix timestamp
+    time_column: "time"   # Default time column name
+
+    # Data preprocessing
+    remove_duplicates: true  # Remove duplicate columns
+    encoding: "utf-8"
+    chunk_size: null  # null for no chunking

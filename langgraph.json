@@ -1,5 +1,8 @@
 {
   "dependencies": ["."],
+  "http": {
+    "app": "./app/http_app.py:app"
+  },
   "graphs": {
     "main": "./app/agents/main_graph.py:main_graph",
     "supervisor": "./app/agents/supervisor_agent.py:supervisor_agent",

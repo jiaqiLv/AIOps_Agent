@@ -84,6 +84,13 @@ class DeepSeekModel(BaseLLM):
 
             response = self._client.invoke(message_list)
 
+            # Check if response has tool_calls (function calling)
+            if hasattr(response, 'tool_calls') and response.tool_calls:
+                logger.debug(f"DeepSeek returned tool_calls: {[tc['name'] for tc in response.tool_calls]}")
+                # Return the full AIMessage object so tool_calls are preserved
+                return response
+
+            # Otherwise return content as string for backward compatibility
             result = response.content
             logger.debug(f"Received response from DeepSeek: {str(result)[:100]}...")
 
@@ -138,6 +145,13 @@ class DeepSeekModel(BaseLLM):
 
             response = await self._client.ainvoke(message_list)
 
+            # Check if response has tool_calls (function calling)
+            if hasattr(response, 'tool_calls') and response.tool_calls:
+                logger.debug(f"DeepSeek returned tool_calls: {[tc['name'] for tc in response.tool_calls]}")
+                # Return the full AIMessage object so tool_calls are preserved
+                return response
+
+            # Otherwise return content as string for backward compatibility
             result = response.content
             logger.debug(f"Received async response from DeepSeek: {str(result)[:100]}...")
 
