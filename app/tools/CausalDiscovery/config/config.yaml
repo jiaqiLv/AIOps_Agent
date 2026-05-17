@@ -1,0 +1,86 @@
+# RADICE Dataset Configuration
+
+context:
+  dataset_name: "RADICE"
+  case_name: "N5"
+  sample_name: "artificialResults_0"
+
+data_loading:
+  type: "radice"
+  dataset_path: "data/raw/{dataset_name}/{case_name}"
+  sample_name: "{sample_name}"
+  load_ground_truth: true
+
+preprocessing:
+  output_path: "data/processed/{dataset_name}/{case_name}/{sample_name}/data_processed.csv"
+  save_correlation_matrix: true
+  processors:
+    missing_values:
+      enabled: true
+      method: "ffill_then_zero"
+    constant_filter:
+      enabled: true
+      variance_threshold: 0
+    wavelet_denoise:
+      enabled: false
+      wavelet: "db4"
+      level: 1
+    correlation_filter:
+      enabled: true
+      threshold: 0.999
+
+knowledge:
+  constraints_path: "config/constraints.yaml"
+  use_level_constraints: false
+
+algorithm:
+  name: "pc"
+  output_dir: "data/output/{dataset_name}/{case_name}/{sample_name}/intermediate"
+  params:
+    alpha: 0.05
+    indep_test: "fisherz"
+    stable: true
+    uc_rule: 0
+    uc_priority: 2
+
+orientation:
+  max_iterations: 100
+  time_lag:
+    enabled: false
+    max_lag: 10
+    correlation_threshold: 0.3
+  igci:
+    enabled: false
+    sample_size: 1000
+    entropy_threshold: 0.01
+
+rca:
+  enabled: true
+  performance_metric: null
+  max_shift: 1
+  max_width: 2
+  shift_penalty: 0.004
+  smooth_penalty: 0.01
+  min_similarity: 0.5
+  max_path_length: 10
+
+evaluation:
+  enabled: true
+  ground_truth_path: null
+  output_path: "data/rca_result/{dataset_name}/{case_name}/{sample_name}/evaluation_results.json"
+
+output:
+  base_dir: "data/output/{dataset_name}/{case_name}/{sample_name}"
+  save_intermediate: true
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/causal_discovery.log"
+
+batch:
+  output_base_dir: "data/output/{dataset_name}"
+  rca_output_base_dir: "data/rca_result/{dataset_name}"
+  processed_output_dir: "data/processed/{dataset_name}"
+  parallel_processing: false
+  max_workers: 1

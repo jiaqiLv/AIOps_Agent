@@ -1,0 +1,56 @@
+# 领域先验知识配置文件
+# For RADICE datasets, level constraints are loaded from layer.txt
+# This file can be used for additional domain-specific constraints
+
+# 指标类型定义 - 使用正则表达式匹配指标名称
+# Note: For RADICE, use numeric IDs like "0", "1", "2", etc.
+metric_type_definitions:
+  Resource (资源层):
+    - ".*cpu.*"
+    - ".*inference_request_qps.*"
+    - ".*mem_usage.*"
+    - ".*disk_usage.*"
+    - ".*disk_inode.*"
+    - ".*gpu.*"
+    - ".*system_5min_load.*"
+    - ".*io_block.*"
+    - ".*disk_iops.*"
+    - ".*network_traffic.*"
+    - ".*io_utilization.*"
+    - ".*io_usage.*"
+    - ".*average_queue_size.*"
+  QoS (服务质量层):
+    - ".*rt_traditional_node.*"
+    - ".*ai_request_avg_duration.*"
+    - ".*rt_cutting_node.*"
+    - ".*ai_request_max_duration.*"
+    - ".*ai_read_image_time.*"
+  Business (业务层):
+    []
+
+# 层级定义 - 将指标类型映射到层级ID
+level_definitions:
+  Resource (资源层): 1  # 底层 - 根因层
+  QoS (服务质量层): 2  # 中层 - 服务质量层
+  Business (业务层): 3  # 高层 - 业务层
+
+# 显式约束定义
+# Note: For RADICE, most constraints are loaded from layer.txt automatically
+explicit_forbidden:
+  []
+  # 示例：明确禁止的因果关系
+  # Prevent higher levels from causing lower levels
+#  - ["9", "0"]
+#  - ["9", "1"]
+#  - ["8", "0"]
+#  - ["8", "1"]
+
+explicit_required:
+  # 示例：明确要求的因果关系
+  # Specific known causal relationships (if any)
+  - ['.*cpu_usage.*', '.*rt_traditional_node.*']
+  - ['.*inference_request_qps.*', '.*ai_request_avg_duration.*']
+  - ['.*memory_usage.*', '.*rt_cutting_node.*']
+  - ['.*system_5min_load.*', '.*rt_traditional_node.*']
+  - ['.*io_block.*', '.*ai_request_max_duration.*']
+  - ['.*disk_iops.*', '.*ai_request_avg_duration.*']

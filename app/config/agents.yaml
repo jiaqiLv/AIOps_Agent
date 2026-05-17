@@ -1,0 +1,38 @@
+agents:
+  supervisor:
+    name: supervisor
+    type: supervisor_agent
+    workflow: react_tool_loop
+    state_schema: app.models.supervisor_state.SupervisorState
+    system_prompt: app/prompts/supervisor_system.md
+    tools:
+      - diagnose_subagent
+      - ask_user
+    model:
+      provider: deepseek
+      name: deepseek-chat
+      temperature: 0
+    max_iterations: 8
+    human_in_the_loop:
+      enabled: true
+      interrupt_on:
+        - missing_required_tool_arguments
+
+  diagnose:
+    name: diagnose
+    type: diagnose_agent
+    workflow: sequential
+    state_schema: app.agents.diagnose_agent.DiagnoseAgentState
+    system_prompt: app/prompts/diagnose_system.md
+    refine_prompt: app/prompts/diagnose_refine.md
+    tools:
+      - csv_reader_tool
+      - rcd_tool
+      - pc_tool
+    model:
+      provider: deepseek
+      name: deepseek-chat
+      temperature: 0
+    max_iterations: 10
+    human_in_the_loop:
+      enabled: false

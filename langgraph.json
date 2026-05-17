@@ -1,0 +1,9 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "main": "./app/agents/main_graph.py:main_graph",
+    "supervisor": "./app/agents/supervisor_agent.py:supervisor_agent",
+    "diagnose": "./app/agents/diagnose_agent.py:diagnose_agent"
+  },
+  "env": ".env"
+}

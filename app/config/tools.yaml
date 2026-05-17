@@ -1,0 +1,41 @@
+tools:
+  ask_user:
+    name: ask_user
+    description: 当工具参数缺失时请求用户补充信息
+    module: app.tools.human_tool
+    function: ask_user
+    args_schema: AskUserInput
+    return_schema: AskUserResult
+    required_fields:
+      - question
+
+  csv_reader_tool:
+    name: csv_reader_tool
+    description: 读取 CSV 指标数据文件，返回包含所有指标列的 DataFrame 信息
+    module: app.tools.csv_reader_tool
+    function: read_csv_metrics
+    args_schema: CsvReaderInput
+    return_schema: CsvReaderResult
+    required_fields:
+      - data_path
+
+  rcd_tool:
+    name: rcd_tool
+    description: 调用 RCD 快速根因推理算法，基于故障注入时间识别候选根因指标
+    module: app.tools.rcd_wrapper
+    function: run_rcd_analysis
+    args_schema: RcdInput
+    return_schema: AlgorithmResult
+    required_fields:
+      - data
+      - inject_time
+
+  pc_tool:
+    name: pc_tool
+    description: 调用 PC 算法进行根因推理和故障传播图建模，基于异常 KPI 指标进行因果发现
+    module: app.tools.pc_wrapper
+    function: run_pc_analysis
+    args_schema: PcInput
+    return_schema: AlgorithmResult
+    required_fields:
+      - data

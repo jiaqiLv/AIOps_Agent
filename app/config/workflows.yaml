@@ -1,0 +1,23 @@
+workflows:
+  react_tool_loop:
+    graph_builder: app.graph.agent_loop.build_react_tool_loop
+    nodes:
+      - model_node
+      - tool_validation_node
+      - tool_node
+      - human_interrupt_node
+      - final_response_node
+    edges:
+      start: model_node
+      model_node:
+        tool_call: tool_validation_node
+        final: final_response_node
+      tool_validation_node:
+        valid: tool_node
+        invalid: human_interrupt_node
+      tool_node:
+        next: model_node
+      human_interrupt_node:
+        next: interrupt
+      final_response_node:
+        next: end
