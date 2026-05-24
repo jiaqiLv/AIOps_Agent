@@ -1,12 +1,13 @@
 """Diagnose Agent - Sequential workflow for root cause analysis
 
 Fixed sequential workflow:
-1. parse_params  — extract parameters from user request (LLM)
-2. load_csv      — read and cache the CSV data
-3. run_rcd       — execute IAF-RCL algorithm (if inject_time available)
-4. run_pc        — execute KE-FPC algorithm
-5. visualize_graph — build propagation topology HTML
-6. refine        — LLM synthesizes final report
+1. parse_params   — extract parameters from user request (LLM)
+2. load_csv       — read and cache the CSV data
+3. run_three_sigma — 3-sigma anomaly pre-filter (if inject_time available)
+4. run_rcd        — execute IAF-RCL algorithm (if inject_time available)
+5. run_pc         — execute KE-FPC algorithm
+6. visualize_graph — build propagation topology HTML
+7. refine         — LLM synthesizes final report
 
 Each node writes AIMessage.tool_calls + ToolMessage pairs to the messages
 state so LangGraph Studio can visualize the tool execution in its trace view.
@@ -31,6 +32,7 @@ from app.utils.prompt_loader import load_prompt
 from app.utils.llm_logger import log_llm_conversation
 from app.tools.rcd_wrapper import run_rcd_analysis
 from app.tools.pc_wrapper import run_pc_analysis
+from app.tools.three_sigma import run_three_sigma
 from app.tools.graph_visualization_tool import visualize_propagation_graph, get_topology_view_url
 from app.utils.topology_chat import (
     build_final_report_messages,
@@ -65,6 +67,7 @@ class DiagnoseAgentState(TypedDict, total=False):
     # Results (csv_data is held in module-level _csv_data_cache, not in state)
     csv_headers: Optional[List[str]]
     rcd_result: Optional[Dict[str, Any]]
+    three_sigma_result: Optional[Dict[str, Any]]
     pc_result: Optional[Dict[str, Any]]
     graph_visualization: Optional[Dict[str, Any]]
     tool_errors: List[Dict[str, Any]]
@@ -361,6 +364,61 @@ def load_csv_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
     return state
 
 
+def run_three_sigma_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
+    """Run 3-sigma anomaly detection to pre-filter anomalous metrics."""
+    csv_path = state.get("csv_file_path", "")
+    df = get_cached_csv(csv_path)
+    inject_time = state.get("inject_time")
+
+    if not inject_time:
+        logger.info("DIAGNOSE: No inject_time, skipping 3-sigma")
+        state["messages"] = _make_tool_message("three_sigma_tool", {
+            "success": False,
+            "error": "未提供 inject_time，跳过 3-sigma 异常检测",
+            "args": {"inject_time": None}
+        })
+        return state
+
+    if df is None:
+        logger.error("DIAGNOSE: No CSV data for 3-sigma")
+        state["tool_errors"] = state.get("tool_errors", []) + [{
+            "step": "three_sigma",
+            "error": "CSV 数据未加载"
+        }]
+        return state
+
+    logger.info(f"DIAGNOSE: Running 3-sigma — inject_time={inject_time}")
+
+    try:
+        result_json = run_three_sigma(data=df, inject_time=inject_time)
+        result = json.loads(result_json)
+        result["success"] = result.get("success", False)
+        state["three_sigma_result"] = result
+
+        anomalies = result.get("anomalies", [])
+        logger.info(f"DIAGNOSE: 3-sigma done — {len(anomalies)} anomalous metrics")
+
+        state["messages"] = _make_tool_message("three_sigma_tool", {
+            "success": result.get("success", False),
+            "args": {"inject_time": inject_time},
+            "metrics_checked": result.get("metrics_checked", 0),
+            "anomalies_found": len(anomalies),
+            "top_anomalies": anomalies[:10],
+        })
+
+    except Exception as e:
+        logger.error(f"DIAGNOSE: 3-sigma failed: {e}")
+        state["three_sigma_result"] = {"success": False, "error": str(e), "anomalies": []}
+        state["tool_errors"] = state.get("tool_errors", []) + [{"step": "three_sigma", "error": str(e)}]
+        state["messages"] = _make_tool_message("three_sigma_tool", {
+            "success": False,
+            "error": str(e),
+            "args": {"inject_time": inject_time},
+        })
+
+    return state
+
+
 def run_rcd_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
     """Run IAF-RCL algorithm if inject_time is available."""
     csv_path = state.get("csv_file_path", "")
@@ -556,6 +614,27 @@ def refine_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
         num_cols = df.select_dtypes(include=['number']).columns.tolist()
         parts.append(f"- 数值指标 ({len(num_cols)} 个): {', '.join(num_cols[:30])}")
 
+    three_sigma = state.get("three_sigma_result")
+    if three_sigma:
+        parts.append("\n## 3-Sigma 异常检测结果")
+        if three_sigma.get("success"):
+            anomalies = three_sigma.get("anomalies", [])
+            params = three_sigma.get("parameters", {})
+            parts.append(f"- 状态: 成功")
+            parts.append(f"- 基线/检测窗口: {params.get('baseline_minutes', '?')}min / {params.get('detect_minutes', '?')}min")
+            parts.append(f"- 阈值: {params.get('threshold', '?')}σ")
+            parts.append(f"- 扫描指标数: {three_sigma.get('metrics_checked', '?')}")
+            parts.append(f"- 异常指标数: {len(anomalies)}")
+            if anomalies:
+                parts.append("- 异常指标 (按z-score降序):")
+                for a in anomalies[:15]:
+                    parts.append(
+                        f"  - {a['metric']}: z={a['z_score']:.2f}, "
+                        f"value={a['value']:.4f}, baseline μ={a['baseline_mean']:.4f}±{a['baseline_std']:.4f}"
+                    )
+        else:
+            parts.append(f"- 状态: 失败\n- 错误: {three_sigma.get('error', 'Unknown')}")
+
     if rcd_result:
         parts.append(f"\n## {ALGORITHM_IAF_RCL} 算法结果")
         if rcd_result.get("success"):
@@ -636,7 +715,7 @@ def refine_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
         logger.error(f"DIAGNOSE: Refine failed: {e}")
         state["integrated_result"] = result_str + "\n\n注: LLM报告生成失败，以上为原始执行结果。"
 
-    # Chat: 第1条=拓扑(Markdown路径+Mermaid+图片)，第2条=LLM分析(纯文本章节)
+    # Chat: 第1条=拓扑(Markdown路径+Mermaid+交互链接)，第2条=LLM分析(纯文本章节)
     state["messages"] = build_final_report_messages(
         state["integrated_result"], graph_viz
     )
@@ -651,7 +730,7 @@ def build_diagnose_agent() -> StateGraph:
     """Build the diagnose agent with sequential workflow.
 
     Graph structure:
-    START → parse_params → load_csv → run_rcd → run_pc → visualize_graph → refine → END
+    START → parse_params → load_csv → run_three_sigma → run_rcd → run_pc → visualize_graph → refine → END
     """
     logger.info("Building diagnose agent with sequential workflow")
 
@@ -659,6 +738,7 @@ def build_diagnose_agent() -> StateGraph:
 
     builder.add_node("parse_params", parse_params_node)
     builder.add_node("load_csv", load_csv_node)
+    builder.add_node("run_three_sigma", run_three_sigma_node)
     builder.add_node("run_rcd", run_rcd_node)
     builder.add_node("run_pc", run_pc_node)
     builder.add_node("visualize_graph", visualize_graph_node)
@@ -666,7 +746,8 @@ def build_diagnose_agent() -> StateGraph:
 
     builder.set_entry_point("parse_params")
     builder.add_edge("parse_params", "load_csv")
-    builder.add_edge("load_csv", "run_rcd")
+    builder.add_edge("load_csv", "run_three_sigma")
+    builder.add_edge("run_three_sigma", "run_rcd")
     builder.add_edge("run_rcd", "run_pc")
     builder.add_edge("run_pc", "visualize_graph")
     builder.add_edge("visualize_graph", "refine")

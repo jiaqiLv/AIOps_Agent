@@ -112,9 +112,10 @@ def generate_diagnose_agent_tools_prompt() -> str:
 
 ⚠️ **强制要求**: 你必须按顺序调用工具，不能跳过任何步骤！
 1. csv_reader_tool（加载数据）
-2. rcd_tool 或 pc_tool（分析根因）
-3. **graph_visualization_tool（生成可视化图）← 第3步必须调用！**
-4. 等待系统生成报告
+2. **three_sigma_tool（异常筛选）← 如有inject_time必须先执行！**
+3. rcd_tool 或 pc_tool（分析根因）
+4. **graph_visualization_tool（生成可视化图）← 必须调用！**
+5. 等待系统生成报告
 
 ## 1. csv_reader_tool - 读取CSV数据文件
 
@@ -128,7 +129,20 @@ def generate_diagnose_agent_tools_prompt() -> str:
     - "11月16日" → `data/ZH_dataset/1116/data.csv`
   - 注意：月日必须补零（1月→01，5日→05）
 
-## 2. rcd_tool（IAF-RCL）- 快速根因推理
+## 2. three_sigma_tool（3-Sigma）- 异常指标筛选
+
+**描述**: 基于故障注入时间，取注入前基线窗口计算各指标均值和标准差，再扫描注入后检测窗口，找出超过3σ阈值的异常指标。结果按z-score降序排列。
+
+**用途**: 在运行RCD/PC之前先用3-sigma快速筛选——PC算法计算量随指标数平方增长，先用3-sigma筛出真正异常的十几个指标再跑因果发现，大幅加速。
+
+**参数**:
+- `inject_time` (float, **必需**): 故障注入时间（Unix时间戳）
+- `baseline_minutes` (int, 可选): 基线窗口（注入前多少分钟），默认5
+- `detect_minutes` (int, 可选): 检测窗口（注入后多少分钟），默认5
+- `threshold` (float, 可选): σ倍数阈值，默认3.0
+- `metric_columns` (list, 可选): 指定检测的指标列，默认自动检测所有数值列
+
+## 3. rcd_tool（IAF-RCL）- 快速根因推理
 
 **描述**: 基于故障注入时间使用 IAF-RCL 算法识别根因指标，返回按优先级排序的候选根因列表。
 
@@ -141,7 +155,7 @@ def generate_diagnose_agent_tools_prompt() -> str:
 - `gamma` (int, 可选): IAF-RCL 算法参数，默认5
 - `abnormal_kpi` (str, 可选): 异常指标名称，从任务中提取
 
-## 3. pc_tool（KE-FPC）- 因果发现分析
+## 4. pc_tool（KE-FPC）- 因果发现分析
 
 **描述**: 使用 KE-FPC 算法进行因果发现，构建故障传播图，识别根因指标和因果关系。
 
@@ -149,7 +163,7 @@ def generate_diagnose_agent_tools_prompt() -> str:
 - `alpha` (float, 可选): 显著性水平，默认0.05
 - `abnormal_kpi` (str, 可选): 异常指标名称，从任务中提取
 
-## 4. graph_visualization_tool - 故障传播图可视化
+## 5. graph_visualization_tool - 故障传播图可视化
 
 **描述**: 生成故障传播图的交互式可视化，用不同颜色区分KPI节点(红色)、根因节点(青色)和中间节点(浅青色)。
 
@@ -157,7 +171,7 @@ def generate_diagnose_agent_tools_prompt() -> str:
 - `edges` (list, **必需**): 因果边列表，格式为 [[source, target], ...]
 - `root_causes` (list, **必需**): 根因指标列表
 - `abnormal_kpi` (str, 可选): 异常指标名称，用于高亮显示
-- `output_format` (str, 可选): 输出格式，"html"(默认交互式) 或 "png"(静态图片)
+- `output_format` (str, 可选): 输出格式，默认 `"html"`（生成交互式拓扑页面）
 - `output_dir` (str, 可选): 输出目录，默认 "outputs/graphs"
 
 ## 工作流程
@@ -172,13 +186,19 @@ def generate_diagnose_agent_tools_prompt() -> str:
 
 然后调用 `csv_reader_tool` 读取数据。
 
-### 第二步：执行根因分析
+### 第二步：3-Sigma异常筛选（推荐）
+如果任务中提供了 `inject_time`，**先调用 `three_sigma_tool`** 快速筛选异常指标：
+- 用 inject_time 分割基线和检测窗口
+- 得到按 z-score 排序的异常指标列表
+- 这能大幅缩小后续 PC 算法的搜索范围，加速分析
+
+### 第三步：执行根因分析
 根据是否有 `inject_time` 决定：
 - **有时间** → 调用 `rcd_tool` 进行快速推理
 - **无时间** → 直接调用 `pc_tool` 进行因果发现
 - **最佳实践** → 同时调用两个算法，交叉验证结果
 
-### 第三步：可视化传播图（必须执行）
+### 第四步：可视化传播图（必须执行）
 **重要**：在 KE-FPC 算法执行完成后，**你必须**调用 `graph_visualization_tool` 生成可视化！
 
 这是分析的最后一步，不要跳过：
@@ -196,7 +216,7 @@ def generate_diagnose_agent_tools_prompt() -> str:
   output_format: html
 ```
 
-### 第四步：生成分析报告
+### 第五步：生成分析报告
 收集所有算法的结果和可视化图链接，生成结构化的根因分析报告。
 
 ## 参数提取规则
@@ -235,15 +255,17 @@ def generate_diagnose_agent_tools_prompt() -> str:
 2. 调用csv_reader_tool:
    data_path="data/ZH_dataset/0105/data.csv"
 
-3. 调用rcd_tool:
+3. 调用three_sigma_tool:
+   inject_time=1736045280 (转换后的时间戳)
+
+4. 调用rcd_tool:
    inject_time=1736045280 (转换后的时间戳)
    abnormal_kpi="full_request_duration_ms_new_10.104.128.205:9093"
 
-4. 调用pc_tool:
-4. 调用pc_tool:
+5. 调用pc_tool:
    abnormal_kpi="full_request_duration_ms_new_10.104.128.205:9093"
 
-5. 调用graph_visualization_tool:
+6. 调用graph_visualization_tool:
    调用: graph_visualization_tool
    参数:
      edges: [["cpu_usage", "mem_usage"], ["mem_usage", "response_time"]]
@@ -251,10 +273,10 @@ def generate_diagnose_agent_tools_prompt() -> str:
      abnormal_kpi: "full_request_duration_ms_new_10.104.128.205:9093"
      output_format: html
 
-6. 综合结果生成报告
+7. 综合结果生成报告
 ```
 
-6. 综合结果生成报告
+7. 综合结果生成报告
 ```
 
 ## 错误处理

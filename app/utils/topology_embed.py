@@ -1,4 +1,4 @@
-"""Build chat-embeddable topology (iframe + inline image) for LangGraph Studio."""
+"""Build chat-embeddable topology (iframe) for LangGraph Studio."""
 
 from __future__ import annotations
 
@@ -162,19 +162,8 @@ def build_chat_iframe_markdown(html_doc: str, height: int = 620) -> str:
     )
 
 
-def build_chat_image_markdown(graph_viz: Dict[str, Any]) -> str:
-    """Inline PNG in chat — prefer base64 so Studio does not need extra HTTP fetch."""
-    b64 = graph_viz.get("base64_png")
-    if b64:
-        return f'\n![根因传播拓扑图](data:image/png;base64,{b64})\n'
-    png_url = graph_viz.get("png_url")
-    if png_url:
-        return f'\n![根因传播拓扑图]({png_url})\n'
-    return ""
-
-
 def build_chat_topology_embed(graph_viz: Dict[str, Any]) -> str:
-    """Full chat appendix: paths + interactive iframe + inline image."""
+    """Full chat appendix: paths + interactive iframe embed."""
     if not graph_viz or not graph_viz.get("success"):
         return ""
 
@@ -199,10 +188,5 @@ def build_chat_topology_embed(graph_viz: Dict[str, Any]) -> str:
         canvas_h = min(720, max(560, n_nodes * 120))
         parts.append("\n### 传播拓扑图（可拖拽 · 已嵌入对话）\n")
         parts.append(build_chat_iframe_markdown(html_doc, height=canvas_h))
-
-    img = build_chat_image_markdown(graph_viz)
-    if img:
-        parts.append("\n### 传播拓扑图（静态预览）\n")
-        parts.append(img)
 
     return "".join(parts)

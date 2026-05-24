@@ -95,6 +95,45 @@ def _wrap_csv_reader(func: Callable) -> Callable:
     return wrapper
 
 
+def _wrap_three_sigma(func: Callable) -> Callable:
+    """Wrap three_sigma tool to use cached CSV data."""
+    def wrapper(inject_time: float, baseline_minutes: int = 5, detect_minutes: int = 5,
+                threshold: float = 3.0, metric_columns: Optional[List[str]] = None, **kwargs) -> str:
+        logger.info(f"TOOL: three_sigma_tool called with inject_time={inject_time}, threshold={threshold}")
+
+        if not _csv_data_cache:
+            return json.dumps({
+                "success": False,
+                "error": "CSV data not loaded. Please call csv_reader_tool first.",
+                "anomalies": [],
+            }, ensure_ascii=False)
+
+        df = list(_csv_data_cache.values())[0]
+
+        try:
+            result = func(
+                data=df,
+                inject_time=inject_time,
+                baseline_minutes=baseline_minutes,
+                detect_minutes=detect_minutes,
+                threshold=threshold,
+                metric_columns=metric_columns,
+            )
+            if isinstance(result, dict):
+                return json.dumps(result, ensure_ascii=False)
+            return result
+
+        except Exception as e:
+            logger.error(f"3-sigma tool failed: {e}")
+            return json.dumps({
+                "success": False,
+                "error": str(e),
+                "anomalies": [],
+            }, ensure_ascii=False)
+
+    return wrapper
+
+
 def _wrap_rcd_tool(func: Callable) -> Callable:
     """Wrap RCD tool to use cached CSV data."""
     def wrapper(inject_time: float, gamma: int = 5, abnormal_kpi: Optional[str] = None, **kwargs) -> str:
@@ -237,12 +276,21 @@ class PcToolInput(BaseModel):
     abnormal_kpi: Optional[str] = Field(default=None, description="Name of the abnormal KPI metric (optional)")
 
 
+class ThreeSigmaInput(BaseModel):
+    """Input schema for three_sigma_tool"""
+    inject_time: float = Field(..., description="Fault injection time as Unix timestamp (seconds)")
+    baseline_minutes: int = Field(default=5, description="Minutes before inject_time for baseline μ/σ calculation (default: 5)")
+    detect_minutes: int = Field(default=5, description="Minutes after inject_time to scan for anomalies (default: 5)")
+    threshold: float = Field(default=3.0, description="Number of standard deviations for anomaly threshold (default: 3.0)")
+    metric_columns: Optional[List[str]] = Field(default=None, description="Specific metric columns to check; if None, all numeric columns except 'time'")
+
+
 class GraphVisualizationToolInput(BaseModel):
     """Input schema for graph_visualization_tool"""
     edges: List[List[str]] = Field(..., description="List of directed edges [[source, target], ...]")
     root_causes: List[str] = Field(..., description="List of root cause metrics")
     abnormal_kpi: Optional[str] = Field(default=None, description="The abnormal KPI metric name (optional)")
-    output_format: str = Field(default="html", description="Output format: 'html' (interactive) or 'png' (static image)")
+    output_format: str = Field(default="html", description="Output format: 'html' (interactive page)")
     output_dir: str = Field(default="outputs/graphs", description="Directory to save output files")
 
 
@@ -286,6 +334,9 @@ def create_langchain_tools(
         if tool_name == "csv_reader_tool":
             wrapped_func = _wrap_csv_reader(tool_func)
             args_schema = CsvReaderInput
+        elif tool_name == "three_sigma_tool":
+            wrapped_func = _wrap_three_sigma(tool_func)
+            args_schema = ThreeSigmaInput
         elif tool_name == "rcd_tool":
             wrapped_func = _wrap_rcd_tool(tool_func)
             args_schema = RcdToolInput
@@ -331,5 +382,5 @@ def create_diagnose_tools(tool_registry: Optional[ToolRegistry] = None) -> List[
     Returns:
         List of LangChain StructuredTool instances for diagnose agent
     """
-    tool_names = ["csv_reader_tool", "rcd_tool", "pc_tool", "graph_visualization_tool", "ask_user"]
+    tool_names = ["csv_reader_tool", "three_sigma_tool", "rcd_tool", "pc_tool", "graph_visualization_tool", "ask_user"]
     return create_langchain_tools(tool_names, tool_registry)

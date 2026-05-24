@@ -198,6 +198,18 @@ def extract_results_node(state: ReactAgentState) -> ReactAgentState:
                         "iteration": state.get("iteration_count", 0)
                     })
 
+            elif tool_name == "three_sigma_tool":
+                state["three_sigma_result"] = result
+                if result.get("success"):
+                    anomalies = result.get("anomalies", [])
+                    logger.info(f"REACT: 3-sigma found {len(anomalies)} anomalous metrics")
+                else:
+                    state["tool_errors"].append({
+                        "tool": tool_name,
+                        "error": result.get("error", "Unknown error"),
+                        "iteration": state.get("iteration_count", 0)
+                    })
+
             elif tool_name == "rcd_tool" or tool_name == "rcd_algorithm":
                 state["rcd_result"] = result
                 if result.get("success"):
@@ -301,6 +313,25 @@ def create_final_response_node(refine_prompt_path: str = "app/prompts/diagnose_r
         csv_headers = state.get("csv_headers")
         if csv_path and csv_headers:
             parts.append(f"\n## CSV 数据\n- 文件: {csv_path}\n- 列数: {len(csv_headers)}")
+
+        # Add 3-sigma results
+        three_sigma_result = state.get("three_sigma_result")
+        if three_sigma_result:
+            parts.append("\n## 3-Sigma 异常检测结果")
+            if three_sigma_result.get("success"):
+                anomalies = three_sigma_result.get("anomalies", [])
+                params = three_sigma_result.get("parameters", {})
+                parts.append(f"- 状态: 成功")
+                parts.append(f"- 基线/检测窗口: {params.get('baseline_minutes', '?')}min / {params.get('detect_minutes', '?')}min")
+                parts.append(f"- 阈值: {params.get('threshold', '?')}σ")
+                parts.append(f"- 扫描指标数: {three_sigma_result.get('metrics_checked', '?')}")
+                parts.append(f"- 异常指标数: {len(anomalies)}")
+                if anomalies:
+                    parts.append(f"- 异常指标 (按z-score降序):")
+                    for a in anomalies[:15]:
+                        parts.append(f"  - {a['metric']}: z={a['z_score']:.2f}, value={a['value']:.4f}, baseline μ={a['baseline_mean']:.4f}±{a['baseline_std']:.4f}")
+            else:
+                parts.append(f"- 状态: 失败\n- 错误: {three_sigma_result.get('error', 'Unknown')}")
 
         # Add RCD results
         rcd_result = state.get("rcd_result")

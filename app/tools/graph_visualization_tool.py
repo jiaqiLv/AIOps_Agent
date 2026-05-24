@@ -369,16 +369,6 @@ def visualize_propagation_graph(
                 nodes, directed_edges, root_causes, abnormal_kpi, output_path, propagation_paths
             )
 
-        # PNG for inline chat display (Studio / dialog)
-        png_result: Dict[str, Any] = {}
-        if output_format == "html" and directed_edges:
-            try:
-                png_result = _generate_png_visualization(
-                    nodes, directed_edges, root_causes, abnormal_kpi, output_path
-                )
-            except Exception as png_err:
-                logger.warning(f"PNG generation for chat skipped: {png_err}")
-
         view_url = get_topology_view_url()
         payload: Dict[str, Any] = {
             "success": True,
@@ -393,15 +383,7 @@ def visualize_propagation_graph(
             "view_url": view_url,
             **result,
         }
-        if png_result.get("base64_content"):
-            payload["base64_png"] = png_result["base64_content"]
-        if png_result.get("png_url"):
-            payload["png_url"] = png_result["png_url"]
-        elif directed_edges:
-            payload["png_url"] = get_topology_png_url()
         payload["embed_url"] = get_topology_embed_url()
-        if png_result.get("filepath") and "png_filepath" not in payload:
-            payload["png_filepath"] = png_result["filepath"]
         return payload
 
     except Exception as e:

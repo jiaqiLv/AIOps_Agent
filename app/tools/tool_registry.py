@@ -73,6 +73,13 @@ class ToolRegistry:
                 "function": "read_csv_metrics",
                 "required_fields": ["data_path"]
             },
+            "three_sigma_tool": {
+                "name": "three_sigma_tool",
+                "description": "Run 3-sigma anomaly detection on time-series metrics",
+                "module": "app.tools.three_sigma",
+                "function": "run_three_sigma",
+                "required_fields": ["inject_time"]
+            },
             "rcd_tool": {
                 "name": "rcd_tool",
                 "description": "Run IAF-RCL algorithm for root cause analysis",

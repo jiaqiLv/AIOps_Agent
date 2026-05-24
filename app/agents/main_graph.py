@@ -101,6 +101,7 @@ def state_to_diagnose(state: MainState) -> ReactAgentState:
         "alpha": state.get("alpha", 0.05),
         "csv_headers": None,
         "rcd_result": None,
+        "three_sigma_result": None,
         "pc_result": None,
         "graph_visualization": None,
         "tool_errors": [],

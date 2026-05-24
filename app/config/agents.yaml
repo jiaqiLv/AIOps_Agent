@@ -28,6 +28,7 @@ agents:
     params_config: app/config/params.yaml
     tools:
       - csv_reader_tool
+      - three_sigma_tool
       - rcd_tool
       - pc_tool
       - graph_visualization_tool

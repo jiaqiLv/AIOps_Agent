@@ -93,7 +93,7 @@ class AgentFactory:
                     "state_schema": "app.models.react_agent_state.ReactAgentState",
                     "system_prompt": "app/prompts/diagnose_system.md",
                     "refine_prompt": "app/prompts/diagnose_refine.md",
-                    "tools": ["csv_reader_tool", "rcd_tool", "pc_tool", "graph_visualization_tool", "ask_user"],
+                    "tools": ["csv_reader_tool", "three_sigma_tool", "rcd_tool", "pc_tool", "graph_visualization_tool", "ask_user"],
                     "max_iterations": 10
                 }
             }

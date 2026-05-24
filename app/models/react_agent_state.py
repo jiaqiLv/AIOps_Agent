@@ -94,6 +94,9 @@ class ReactAgentState(TypedDict, total=False):
     alpha: float
     """KE-FPC algorithm alpha parameter (default: 0.05)"""
 
+    three_sigma_result: Optional[Dict[str, Any]]
+    """3-sigma anomaly detection result (legacy, also in tool_results["three_sigma_tool"])"""
+
     rcd_result: Optional[Dict[str, Any]]
     """IAF-RCL algorithm result (legacy, also in tool_results["rcd_tool"])"""
 

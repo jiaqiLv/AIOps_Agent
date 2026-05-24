@@ -9,7 +9,6 @@ from langchain_core.messages import AIMessage
 from app.config.algorithm_names import ALGORITHM_KE_FPC
 from app.tools.graph_visualization_tool import (
     get_topology_embed_url,
-    get_topology_png_url,
     get_topology_view_url,
 )
 
@@ -88,7 +87,7 @@ def paths_to_mermaid_flowchart(
 
 
 def build_topology_markdown_block(graph_viz: Dict[str, Any]) -> str:
-    """Studio-friendly block: paths + mermaid + markdown image (no HTML/iframe)."""
+    """Studio-friendly block: paths + mermaid + interactive topology links."""
     if not graph_viz or not graph_viz.get("success"):
         return ""
 
@@ -108,23 +107,15 @@ def build_topology_markdown_block(graph_viz: Dict[str, Any]) -> str:
     if mermaid:
         parts.extend(["### 传播拓扑流程图", "", mermaid, ""])
 
-    png_url = graph_viz.get("png_url") or get_topology_png_url()
-    parts.extend([
-        "### 传播拓扑结构图",
-        "",
-        f"![根因传播拓扑图]({png_url})",
-        "",
-    ])
-
+    view_url = graph_viz.get("view_url") or get_topology_view_url()
     embed_url = graph_viz.get("embed_url") or get_topology_embed_url()
     parts.extend([
-        "### 可拖拽交互拓扑",
+        "### 可交互传播拓扑",
         "",
-        f"**[{embed_url}]({embed_url})**",
+        f"- **完整页面**: [{view_url}]({view_url})",
+        f"- **可拖拽交互页**: [{embed_url}]({embed_url})",
         "",
         "> 在浏览器中打开后：**用鼠标拖动节点**即可调整位置，节点文字已放大便于阅读。",
-        "",
-        f"> 静态图备用地址：`{png_url}`",
     ])
 
     return "\n".join(parts)
