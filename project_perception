@@ -1,0 +1,169 @@
+app
+├── agents  # 所有的agent
+│   ├── agent_factory.py  # 自动化生成agent？
+│   ├── diagnose_agent.py  # diagnose_agent 诊断agent
+│   ├── __init__.py  # 向外暴露有那些agent可用
+│   ├── main_graph.py  # 主图用于黏合各个agent
+│   ├── nodes  # 不知道干什么的
+│   │   ├── __init__.py
+│   │   ├── prompt_based_react.py
+│   │   └── react_nodes.py
+│   └── supervisor_agent.py   # 主agent，用于判断调用那些小agent
+├── config  # 配置文件夹，可能是用于自动配置agent的？？
+│   ├── agents.yaml
+│   ├── algorithm_names.py
+│   ├── __init__.py
+│   ├── model_config.py
+│   ├── params.yaml
+│   ├── settings.py
+│   ├── tool_config.py
+│   ├── tools.yaml
+│   └── workflows.yaml
+├── graph  # graph入口为了langgraph启动，本身无意义
+│   ├── builder.py
+│   └── __init__.py
+├── http_app.py  # http_app路由？
+├── __init__.py
+├── main.py  # 可能是以前做工具是准备弄成命令行的样子的入口
+├── models  # model的选择和配置代码
+│   ├── base.py
+│   ├── deepseek.py
+│   ├── __init__.py
+│   ├── model_factory.py
+│   ├── react_agent_state.py
+│   ├── schemas.py
+│   └── supervisor_state.py
+├── prompts  # 给各个agent的prompt
+│   ├── diagnose_refine.md
+│   ├── diagnose_system.md
+│   ├── __init__.py
+│   └── supervisor_system.md
+├── skills  # skills？ 这不知道是干什么的
+│   ├── data_loading_skill.py
+│   ├── __init__.py
+│   └── result_formatting_skill.py
+├── static  # 这个是为了展示图片，加强可视化的文件存储的位置
+│   └── topology
+│       └── vis-network.min.js
+├── subagents  # ??这不知道是干什么的，可能是用于agent自动化生成的
+│   └── __init__.py
+├── tools  # 一些算法的具体实现，3sigma应该在这里实现
+│   ├── CausalDiscovery
+│   │   ├── agent.md
+│   │   ├── batch.py
+│   │   ├── CLAUDE.md
+│   │   ├── config
+│   │   │   ├── config.yaml
+│   │   │   ├── constraints.yaml
+│   │   │   └── zh_config.yaml
+│   │   ├── LICENSE
+│   │   ├── README.md
+│   │   ├── requirements.txt
+│   │   ├── run.py
+│   │   ├── run_zh.py
+│   │   ├── scripts
+│   │   │   ├── acc.py
+│   │   │   ├── benchmark
+│   │   │   │   ├── evaluation.py
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── metrics.py
+│   │   │   │   ├── rq1.py
+│   │   │   │   └── rq2.py
+│   │   │   ├── conditional_entropy_causal_direction.py
+│   │   │   ├── copula_causal_direction.py
+│   │   │   ├── entropy_causal_direction.py
+│   │   │   ├── export_requirements.bat
+│   │   │   ├── export_requirements.py
+│   │   │   ├── export_requirements.sh
+│   │   │   ├── fast_causal_direction.py
+│   │   │   ├── graph_heads
+│   │   │   │   ├── dfs.py
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── page_rank.py
+│   │   │   │   ├── random_selection.py
+│   │   │   │   ├── random_walk.py
+│   │   │   │   └── rht.py
+│   │   │   ├── igci_test.py
+│   │   │   ├── kci_conditional_independence.py
+│   │   │   ├── lingam_causal_direction.py
+│   │   │   ├── merge_zh_dataset.py
+│   │   │   ├── page_rank.py
+│   │   │   ├── plot_ccf_from_csv.py
+│   │   │   ├── plot_metrics_with_anomaly.py
+│   │   │   ├── plot_metrics_with_events.py
+│   │   │   ├── plot_radice_data.py
+│   │   │   ├── preprocess_radice_dataset.py
+│   │   │   ├── random_selection.py
+│   │   │   ├── random_walk.py
+│   │   │   ├── README.md
+│   │   │   ├── residual_correlation.py
+│   │   │   └── test_pagerank.py
+│   │   ├── src
+│   │   │   ├── algorithms
+│   │   │   │   ├── base_algorithm.py
+│   │   │   │   ├── factory.py
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── pc_algorithm.py
+│   │   │   ├── dataloader
+│   │   │   │   ├── container.py
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── loaders
+│   │   │   │       ├── base_loader.py
+│   │   │   │       ├── csv_loader.py
+│   │   │   │       ├── __init__.py
+│   │   │   │       └── radice_loader.py
+│   │   │   ├── evaluation
+│   │   │   │   ├── evaluator.py
+│   │   │   │   ├── graph_evaluator.py
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── metrics.py
+│   │   │   │   └── rca_evaluator.py
+│   │   │   ├── __init__.py
+│   │   │   ├── knowledge
+│   │   │   │   ├── background_knowledge.py
+│   │   │   │   ├── classifier.py
+│   │   │   │   ├── constraint_builder.py
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── knowledge_manager.py
+│   │   │   ├── MODULE_STRUCTURE.md
+│   │   │   ├── orientation
+│   │   │   │   ├── cascade_orientator.py
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── orientation_tracker.py
+│   │   │   ├── output
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── result_saver.py
+│   │   │   ├── preprocessing
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── pipeline.py
+│   │   │   │   ├── processors
+│   │   │   │   │   ├── base_processor.py
+│   │   │   │   │   ├── constant_filter.py
+│   │   │   │   │   ├── correlation_filter.py
+│   │   │   │   │   ├── __init__.py
+│   │   │   │   │   ├── missing_values.py
+│   │   │   │   │   └── wavelet_denoise.py
+│   │   │   │   └── registry.py
+│   │   │   ├── rca
+│   │   │   │   ├── correlation_adjustment.py
+│   │   │   │   ├── graph_subtraction.py
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── rca_engine.py
+│   │   │   └── utils
+│   │   │       ├── config_manager.py
+│   │   │       ├── __init__.py
+│   │   │       └── logger.py
+│   │   └── system_design.md
+│   ├── csv_reader_tool.py
+│   ├── graph_visualization_tool.py
+│   ├── human_tool.py
+│   ├── __init__.py
+│   ├── langchain_tool_adapters.py
+│   ├── pc_wrapper.py
+│   ├── rcd
+│   │   ├── __init__.py
+│   │   ├── rcd.py
+│   │   └── time_series.py
+│   ├── rcd_wrapper.py
+│   └── tool_registry.py
+└── utils  # 有用的一些小函数

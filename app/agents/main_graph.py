@@ -14,6 +14,7 @@ from langgraph.graph.ui import AnyUIMessage, ui_message_reducer
 from app.agents.supervisor_agent import SupervisorAgentState, supervisor_agent as supervisor_subgraph
 from app.models.react_agent_state import ReactAgentState
 from app.agents.diagnose_agent import diagnose_agent as diagnose_subgraph
+from app.agents.detect_agent import DetectAgentState, detect_agent as detect_subgraph
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -109,6 +110,57 @@ def state_to_diagnose(state: MainState) -> ReactAgentState:
     }
 
 
+def state_to_detect(state: MainState) -> DetectAgentState:
+    """Convert main state to detect state."""
+    task = state.get("user_input", "")
+    if not task:
+        for msg in reversed(state.get("messages", [])):
+            if isinstance(msg, HumanMessage):
+                task = _get_text(msg.content)
+                break
+
+    return {
+        "messages": [],
+        "task_description": task,
+        "csv_file_path": state.get("csv_file_path"),
+        "inject_time": state.get("inject_time"),
+        "csv_headers": None,
+        "three_sigma_result": None,
+        "tool_errors": [],
+        "integrated_result": None,
+    }
+
+
+def detect_node(state: MainState) -> MainState:
+    """Node that wraps the detect subgraph."""
+    logger.info("MAIN: Entering detect subgraph")
+
+    if not state.get("user_input"):
+        for msg in reversed(state.get("messages", [])):
+            if isinstance(msg, HumanMessage):
+                state["user_input"] = _get_text(msg.content)
+                break
+
+    logger.info(f"MAIN: Detect — user_input='{str(state.get('user_input', ''))[:80]}'")
+
+    detect_state = state_to_detect(state)
+    result = detect_subgraph.invoke(detect_state)
+
+    logger.info(f"MAIN: Detect result keys: {result.keys() if isinstance(result, dict) else 'not a dict'}")
+
+    state["diagnose_result"] = result
+
+    if result.get("csv_file_path"):
+        state["csv_file_path"] = result["csv_file_path"]
+    if result.get("inject_time"):
+        state["inject_time"] = result["inject_time"]
+
+    state["action"] = "have_diagnose_result"
+
+    logger.info("MAIN: Detect completed, will return to supervisor")
+    return state
+
+
 def supervisor_node(state: MainState) -> MainState:
     """Node that wraps the supervisor subgraph."""
     logger.info("MAIN: Entering supervisor subgraph")
@@ -185,16 +237,19 @@ def diagnose_node(state: MainState) -> MainState:
     return state
 
 
-def route_main(state: MainState) -> Literal["supervisor_agent", "diagnose_agent", END]:
+def route_main(state: MainState) -> Literal["supervisor_agent", "diagnose_agent", "detect_agent", END]:
     """
     Route function for main graph.
     - "call_diagnose" → diagnose_agent
+    - "call_detect" → detect_agent
     - "have_diagnose_result" → supervisor_agent
     - otherwise → END
     """
     action = state.get("action", "")
     if action == "call_diagnose":
         return "diagnose_agent"
+    if action == "call_detect":
+        return "detect_agent"
     if action == "have_diagnose_result":
         return "supervisor_agent"
     return END
@@ -208,6 +263,7 @@ def build_main_graph() -> StateGraph:
 
     builder.add_node("supervisor_agent", supervisor_node)
     builder.add_node("diagnose_agent", diagnose_node)
+    builder.add_node("detect_agent", detect_node)
 
     builder.set_entry_point("supervisor_agent")
 
@@ -216,12 +272,14 @@ def build_main_graph() -> StateGraph:
         route_main,
         {
             "diagnose_agent": "diagnose_agent",
+            "detect_agent": "detect_agent",
             "supervisor_agent": "supervisor_agent",
             END: END
         }
     )
 
     builder.add_edge("diagnose_agent", "supervisor_agent")
+    builder.add_edge("detect_agent", "supervisor_agent")
 
     graph = builder.compile()
     logger.info("Main graph compiled with nested subgraphs")

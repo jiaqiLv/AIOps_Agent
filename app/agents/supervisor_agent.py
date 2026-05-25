@@ -57,9 +57,24 @@ DIAGNOSIS_KEYWORDS = [
     "root cause", "diagnose anomaly",
 ]
 
+# Keywords that indicate detection-only intent
+DETECTION_KEYWORDS = [
+    "异常检测", "检测异常", "3-sigma", "3sigma", "三西格玛",
+    "异常扫描", "指标异常", "anomaly detection", "detect anomaly",
+    "有哪些异常", "异常指标", "异常告警",
+]
+
 def is_diagnosis_intent(user_input: str) -> bool:
     """Conservative keyword match — only triggers on explicit diagnosis requests."""
     return any(kw in user_input.lower() for kw in DIAGNOSIS_KEYWORDS)
+
+def is_detection_intent(user_input: str) -> bool:
+    """Check if user intent is anomaly detection only (not full root cause analysis)."""
+    user_lower = user_input.lower()
+    has_detection = any(kw in user_lower for kw in DETECTION_KEYWORDS)
+    has_diagnosis = any(kw in user_lower for kw in DIAGNOSIS_KEYWORDS)
+    # Detection intent: has detection keywords but no diagnosis keywords
+    return has_detection and not has_diagnosis
 
 
 def supervisor_llm_node(state: SupervisorAgentState) -> SupervisorAgentState:
@@ -156,21 +171,24 @@ def supervisor_llm_node(state: SupervisorAgentState) -> SupervisorAgentState:
 
 ## 判断标准
 
-如果用户请求以下任何操作，action 设为 "call_diagnose"：
-- 微服务异常事件分析
+如果用户请求以下操作，action 设为 "call_diagnose"（完整根因分析）：
+- 微服务异常事件分析、故障根因定位、根因诊断
 - 指标数据分析
-- 故障根因定位
-- 根因诊断
 - 使用 IAF-RCL/KE-FPC 算法
-- 故障传播图生成
+- 故障传播图生成、因果发现、故障传播路径分析
 - **或者用户输入包含大量日志输出、技术术语或之前诊断结果的片段**（这表示用户在继续或询问之前的诊断工作）
+
+如果用户仅请求异常检测（不涉及根因分析），action 设为 "call_detect"：
+- 异常检测、3-Sigma 检测、三西格玛
+- 扫描哪些指标异常、有哪些异常指标
+- 指标异常告警
 
 否则（简单的问候、帮助、闲聊等），action 设为 "respond"。
 
 输出 JSON：
 ```json
 {{
-  "action": "call_diagnose | respond",
+  "action": "call_diagnose | call_detect | respond",
   "message": "回复内容（仅在 respond 时）"
 }}
 ```
@@ -188,6 +206,8 @@ def supervisor_llm_node(state: SupervisorAgentState) -> SupervisorAgentState:
             # Fallback to keyword matching
             if is_diagnosis_intent(user_input):
                 decision = {"action": "call_diagnose"}
+            elif is_detection_intent(user_input):
+                decision = {"action": "call_detect"}
             else:
                 decision = {"action": "respond", "message": "您好！我是 AIOps 根因分析助手。"}
 
@@ -198,6 +218,8 @@ def supervisor_llm_node(state: SupervisorAgentState) -> SupervisorAgentState:
         # Conservative fallback: only route to diagnose on explicit keywords
         if is_diagnosis_intent(user_input):
             decision = {"action": "call_diagnose"}
+        elif is_detection_intent(user_input):
+            decision = {"action": "call_detect"}
         else:
             decision = {"action": "respond", "message": "您好！我是 AIOps 根因分析助手。请描述您需要分析的故障现象。"}
 
@@ -208,7 +230,10 @@ def supervisor_llm_node(state: SupervisorAgentState) -> SupervisorAgentState:
     if action == "call_diagnose":
         logger.info("SUPERVISOR: Routing to diagnose_agent (no parameter validation)")
         state["continue_conversation"] = True
-        # Do NOT extract or validate parameters - diagnose_agent will handle it
+
+    elif action == "call_detect":
+        logger.info("SUPERVISOR: Routing to detect_agent (anomaly detection only)")
+        state["continue_conversation"] = True
 
     elif action == "respond":
         response_message = decision.get("message", "")
