@@ -52,3 +52,5 @@ data/*.csv
 !data/sample_metrics.csv
 /data/
 /docs/
+
+commands.txt
