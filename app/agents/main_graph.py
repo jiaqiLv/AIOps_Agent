@@ -47,6 +47,7 @@ class MainState(TypedDict, total=False):
     alpha: Optional[float]
     dataset_type: Optional[str]
     diagnose_result: Optional[Dict[str, Any]]
+    detect_result: Optional[Dict[str, Any]]
 
 
 def state_to_supervisor(state: MainState, has_diagnose_result: bool = False) -> SupervisorAgentState:
@@ -62,6 +63,7 @@ def state_to_supervisor(state: MainState, has_diagnose_result: bool = False) -> 
         "alpha": state.get("alpha"),
         "dataset_type": state.get("dataset_type"),
         "diagnose_result": state.get("diagnose_result") if has_diagnose_result else None,
+        "detect_result": state.get("detect_result") if has_diagnose_result else None,
         "response_message": None,
         "continue_conversation": True
     }
@@ -107,6 +109,7 @@ def state_to_diagnose(state: MainState) -> ReactAgentState:
         "graph_visualization": None,
         "tool_errors": [],
         "integrated_result": None,
+        "detect_result": state.get("detect_result"),
     }
 
 
@@ -132,8 +135,13 @@ def state_to_detect(state: MainState) -> DetectAgentState:
 
 
 def detect_node(state: MainState) -> MainState:
-    """Node that wraps the detect subgraph."""
-    logger.info("MAIN: Entering detect subgraph")
+    """Node that wraps the detect subgraph.
+
+    When triggered by call_diagnose, saves result for comparison and chains to diagnose.
+    When triggered standalone (call_detect), goes back to supervisor.
+    """
+    original_action = state.get("action", "")
+    logger.info(f"MAIN: Entering detect subgraph (original_action={original_action})")
 
     if not state.get("user_input"):
         for msg in reversed(state.get("messages", [])):
@@ -148,16 +156,22 @@ def detect_node(state: MainState) -> MainState:
 
     logger.info(f"MAIN: Detect result keys: {result.keys() if isinstance(result, dict) else 'not a dict'}")
 
-    state["diagnose_result"] = result
+    # Save detect result for comparison (used by diagnose_agent and supervisor)
+    state["detect_result"] = result
 
     if result.get("csv_file_path"):
         state["csv_file_path"] = result["csv_file_path"]
     if result.get("inject_time"):
         state["inject_time"] = result["inject_time"]
 
-    state["action"] = "have_diagnose_result"
+    # Chain: if called from call_diagnose, route to diagnose_agent next
+    if original_action == "call_diagnose":
+        state["action"] = "call_diagnose"
+        logger.info("MAIN: Detect completed, chaining to diagnose_agent for comparison")
+    else:
+        state["action"] = "have_diagnose_result"
+        logger.info("MAIN: Detect completed, will return to supervisor")
 
-    logger.info("MAIN: Detect completed, will return to supervisor")
     return state
 
 
@@ -239,20 +253,31 @@ def diagnose_node(state: MainState) -> MainState:
 
 def route_main(state: MainState) -> Literal["supervisor_agent", "diagnose_agent", "detect_agent", END]:
     """
-    Route function for main graph.
-    - "call_diagnose" → diagnose_agent
-    - "call_detect" → detect_agent
+    Route function for main graph (after supervisor).
+    - "call_diagnose" → detect_agent (run detect first, then chain to diagnose)
+    - "call_detect" → detect_agent (standalone detection)
     - "have_diagnose_result" → supervisor_agent
     - otherwise → END
     """
     action = state.get("action", "")
     if action == "call_diagnose":
-        return "diagnose_agent"
+        return "detect_agent"
     if action == "call_detect":
         return "detect_agent"
     if action == "have_diagnose_result":
         return "supervisor_agent"
     return END
+
+
+def route_after_detect(state: MainState) -> Literal["diagnose_agent", "supervisor_agent"]:
+    """Route after detect_agent completes.
+    - If chaining (call_diagnose) → diagnose_agent
+    - If standalone (call_detect) → supervisor_agent
+    """
+    action = state.get("action", "")
+    if action == "call_diagnose":
+        return "diagnose_agent"
+    return "supervisor_agent"
 
 
 def build_main_graph() -> StateGraph:
@@ -279,7 +304,14 @@ def build_main_graph() -> StateGraph:
     )
 
     builder.add_edge("diagnose_agent", "supervisor_agent")
-    builder.add_edge("detect_agent", "supervisor_agent")
+    builder.add_conditional_edges(
+        "detect_agent",
+        route_after_detect,
+        {
+            "diagnose_agent": "diagnose_agent",
+            "supervisor_agent": "supervisor_agent",
+        }
+    )
 
     graph = builder.compile()
     logger.info("Main graph compiled with nested subgraphs")

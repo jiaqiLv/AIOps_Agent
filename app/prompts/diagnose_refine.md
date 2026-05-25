@@ -40,6 +40,8 @@
 
 若 3-Sigma 未执行（无 inject_time）或执行失败，仍输出 `## 异常检测结果` 章节，简要说明「未执行」或失败原因，不要省略该章节标题。
 
+**若输入中包含「Detect Agent 独立检测结果（对比参考）」**：该部分是独立的 Detect Agent 单独运行 3-Sigma 的结果。你需要在 `## 异常检测结果` 章节末尾添加「与 Detect Agent 对比」小节，对比 Diagnose Agent 内置 3-Sigma 和 Detect Agent 独立 3-Sigma 的结果异同（如检出指标是否一致、z-score 排名差异、异常数量差异等），并分析差异可能的原因。
+
 ### 2. 根因指标精化
 
 - IAF-RCL + KE-FPC 均命中 → 高置信度，标注 `IAF-RCL+KE-FPC`

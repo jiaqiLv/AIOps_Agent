@@ -45,6 +45,7 @@ class SupervisorAgentState(TypedDict, total=False):
     alpha: Optional[float]
     dataset_type: Optional[str]
     diagnose_result: Optional[Dict[str, Any]]
+    detect_result: Optional[Dict[str, Any]]
     response_message: Optional[str]
     continue_conversation: bool
 
@@ -97,9 +98,9 @@ def supervisor_llm_node(state: SupervisorAgentState) -> SupervisorAgentState:
     # Reset action
     state["action"] = "respond"
 
-    # --- Case 1: Diagnose result available ---
+    # --- Case 1: Diagnose/Detect result available ---
     if diagnose_result:
-        logger.info("SUPERVISOR: Processing diagnose result")
+        logger.info("SUPERVISOR: Processing diagnose/detect result")
         integrated_result = diagnose_result.get("integrated_result")
 
         # If integrated_result is not set, build one from available information
@@ -125,11 +126,24 @@ def supervisor_llm_node(state: SupervisorAgentState) -> SupervisorAgentState:
         if not integrated_result:
             integrated_result = "根因分析已完成。"
 
+        result_messages = []
+
+        # If detect_result exists (detect ran first for comparison), prepend it
+        detect_result = state.get("detect_result")
+        if detect_result:
+            detect_integrated = detect_result.get("integrated_result", "")
+            if detect_integrated:
+                result_messages.append(AIMessage(
+                    content=f"## Detect Agent 独立检测结果（对比参考）\n\n{detect_integrated}"
+                ))
+            state["detect_result"] = None
+
         diagnose_ai = [
             m for m in (diagnose_result.get("messages") or [])
             if isinstance(m, AIMessage) and m.content
         ]
-        state["messages"] = diagnose_ai if diagnose_ai else [AIMessage(content=integrated_result)]
+        result_messages.extend(diagnose_ai if diagnose_ai else [AIMessage(content=integrated_result)])
+        state["messages"] = result_messages
         state["diagnose_result"] = None
         state["continue_conversation"] = True
         state["action"] = "respond"

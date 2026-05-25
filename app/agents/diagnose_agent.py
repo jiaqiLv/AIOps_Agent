@@ -70,6 +70,7 @@ class DiagnoseAgentState(TypedDict, total=False):
     three_sigma_result: Optional[Dict[str, Any]]
     pc_result: Optional[Dict[str, Any]]
     graph_visualization: Optional[Dict[str, Any]]
+    detect_result: Optional[Dict[str, Any]]
     tool_errors: List[Dict[str, Any]]
     integrated_result: Optional[str]
 
@@ -662,6 +663,29 @@ def refine_node(state: DiagnoseAgentState) -> DiagnoseAgentState:
         parts.append("\n## 执行错误")
         for err in tool_errors:
             parts.append(f"- {err.get('step', 'unknown')}: {err.get('error', 'unknown')}")
+
+    # Detect Agent independent result (for comparison when chained from call_diagnose)
+    detect_result = state.get("detect_result")
+    if detect_result:
+        parts.append("\n## Detect Agent 独立检测结果（对比参考）")
+        detect_ts = detect_result.get("three_sigma_result", {})
+        if detect_ts and detect_ts.get("success"):
+            detect_anomalies = detect_ts.get("anomalies", [])
+            detect_params = detect_ts.get("parameters", {})
+            parts.append(f"- 独立检测方法: 3-Sigma（基线: {detect_params.get('baseline_minutes', '?')}min / 检测: {detect_params.get('detect_minutes', '?')}min / 阈值: {detect_params.get('threshold', '?')}σ）")
+            parts.append(f"- 独立扫描指标数: {detect_ts.get('metrics_checked', '?')}，检出异常: {len(detect_anomalies)}")
+            if detect_anomalies:
+                parts.append("- 独立检出异常指标 (按z-score降序):")
+                for a in detect_anomalies[:10]:
+                    parts.append(
+                        f"  - {a['metric']}: z={a['z_score']:.2f}, "
+                        f"value={a['value']:.4f}, baseline μ={a['baseline_mean']:.4f}±{a['baseline_std']:.4f}"
+                    )
+        elif detect_result.get("tool_errors"):
+            parts.append(f"- 独立检测状态: 失败")
+            for err in detect_result.get("tool_errors", []):
+                parts.append(f"  - {err.get('step', 'unknown')}: {err.get('error', 'unknown')}")
+        parts.append("\n请在报告中对比 Detect Agent 独立检测结果与 Diagnose Agent 内置 3-Sigma 结果，说明异同。")
 
     graph_viz = state.get("graph_visualization")
     if graph_viz and graph_viz.get("success"):
