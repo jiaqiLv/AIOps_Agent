@@ -1,3 +1,7 @@
+
+
+
+
 # Python
 __pycache__/
 *.py[cod]
@@ -23,7 +27,7 @@ wheels/
 # Virtual Environment
 venv/
 env/
-ENV/
+E               NV/
 .venv/
 
 # IDE
@@ -52,3 +56,4 @@ data/*.csv
 !data/sample_metrics.csv
 /data/
 /docs/
+/case.md

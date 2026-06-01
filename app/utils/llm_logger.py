@@ -1,12 +1,14 @@
 """LLM Conversation Logger
 
 Logs LLM input/output conversations to files for debugging.
+Includes session-based TraceLogger for chronological JSONL tracing.
 """
 
 import os
 import json
+import time
 from datetime import datetime
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Dict
 from pathlib import Path
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
@@ -206,3 +208,139 @@ def get_recent_logs(agent_name: Optional[str] = None, limit: int = 10) -> List[s
     log_files = sorted(LOG_DIR.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
 
     return [str(f) for f in log_files[:limit]]
+
+
+# ==================== Session-based Trace Logger ====================
+
+TRACE_DIR = Path("log/traces")
+
+# Truncation limit for large content (50KB)
+_MAX_CONTENT_BYTES = 50 * 1024
+
+# Global singleton
+_trace_logger: Optional["TraceLogger"] = None
+
+
+def _truncate_content(content: Any, max_bytes: int = _MAX_CONTENT_BYTES) -> Any:
+    """Truncate string content to max_bytes, returning a summary suffix."""
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False, default=str)
+    if len(content.encode("utf-8", errors="replace")) <= max_bytes:
+        return content
+    # Truncate and add note
+    truncated = content[:max_bytes]
+    return truncated + f"\n...[truncated, total {len(content)} chars]"
+
+
+class TraceLogger:
+    """Session-based trace logger that writes chronological JSONL events.
+
+    All LLM calls and tool calls from one run are written to a single file,
+    making it easy to trace the full execution flow end-to-end.
+    """
+
+    def __init__(self, session_id: Optional[str] = None):
+        if session_id is None:
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_id = session_id
+        self.filepath = TRACE_DIR / f"trace_{session_id}.jsonl"
+        TRACE_DIR.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Trace session started: {self.filepath}")
+
+    def _write_event(self, event: Dict) -> None:
+        """Write a single JSON event to the trace file with indentation."""
+        event["ts"] = datetime.now().isoformat(timespec="milliseconds")
+        try:
+            pretty = json.dumps(event, ensure_ascii=False, default=str, indent=2)
+            with open(self.filepath, "a", encoding="utf-8") as f:
+                f.write(pretty + "\n\n")
+        except (TypeError, ValueError) as e:
+            logger.warning(f"TraceLogger: Failed to serialize event: {e}")
+
+    def log_llm_call(
+        self,
+        agent: str,
+        input_messages: List,
+        response: Any,
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        """Log an LLM inference call.
+
+        Args:
+            agent: Name identifying the caller (e.g. "supervisor_planner").
+            input_messages: Messages sent to the LLM.
+            response: LLM response object.
+            metadata: Optional extra info dict.
+        """
+        # Serialize input messages
+        input_serialized = []
+        for msg in input_messages:
+            if isinstance(msg, BaseMessage):
+                input_serialized.append(message_to_dict(msg))
+            elif isinstance(msg, dict):
+                input_serialized.append(msg)
+            else:
+                input_serialized.append({"type": type(msg).__name__, "content": str(msg)})
+
+        # Serialize response
+        response_serialized: Dict[str, Any] = {}
+        if response is not None:
+            if isinstance(response, BaseMessage):
+                response_serialized = message_to_dict(response)
+            elif isinstance(response, str):
+                response_serialized = {"type": "str", "content": _truncate_content(response)}
+            else:
+                response_serialized = {"type": type(response).__name__, "content": _truncate_content(str(response))}
+
+        self._write_event({
+            "type": "llm_call",
+            "agent": agent,
+            "input_messages": input_serialized,
+            "response": response_serialized,
+            "metadata": metadata or {},
+        })
+
+    def log_tool_call(
+        self,
+        agent: str,
+        tool_name: str,
+        args: Dict,
+        result: Any,
+        duration_ms: float,
+        error: Optional[str] = None,
+    ) -> None:
+        """Log a tool execution call.
+
+        Args:
+            agent: Name of the agent that invoked the tool.
+            tool_name: Name of the tool.
+            args: Tool arguments dict.
+            result: Tool return value (string or dict).
+            duration_ms: Execution time in milliseconds.
+            error: Error message if the tool failed.
+        """
+        result_str = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+        self._write_event({
+            "type": "tool_call",
+            "agent": agent,
+            "tool": tool_name,
+            "args": args,
+            "result": _truncate_content(result_str),
+            "duration_ms": round(duration_ms, 1),
+            "error": error,
+        })
+
+
+def get_trace_logger() -> TraceLogger:
+    """Get or create the global TraceLogger singleton."""
+    global _trace_logger
+    if _trace_logger is None:
+        _trace_logger = TraceLogger()
+    return _trace_logger
+
+
+def reset_trace_logger(session_id: Optional[str] = None) -> TraceLogger:
+    """Create a fresh TraceLogger for a new run. Call at the start of each request."""
+    global _trace_logger
+    _trace_logger = TraceLogger(session_id=session_id)
+    return _trace_logger

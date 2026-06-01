@@ -105,3 +105,16 @@ class ReactAgentState(TypedDict, total=False):
 
     integrated_result: Optional[str]
     """Synonym for final_response (legacy compatibility)"""
+
+    graph_visualizations: Optional[List[Dict[str, Any]]]
+    """List of graph visualization results from graph_visualization_tool"""
+
+    # ==================== Structured Diagnose Output ====================
+    fault_type: Optional[str]
+    """Inferred fault type (e.g. CPU_RESOURCE_SATURATION, MEMORY_LEAK)"""
+
+    root_causes: Optional[List[Dict[str, Any]]]
+    """Structured root cause records with metric, confidence, algorithms, reason"""
+
+    propagation_path: Optional[List[Dict[str, Any]]]
+    """Causal propagation edges from pc_tool"""

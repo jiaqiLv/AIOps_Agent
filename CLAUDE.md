@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AIOps Agent is a conversational root cause analysis system for microservice anomalies. It uses a Supervisor-Agent architecture with LangGraph workflows to analyze metrics data using IAF-RCL and KE-FPC causal discovery algorithms (wrapped as `rcd_tool` and `pc_tool`).
+AIOps Agent is a conversational root cause analysis system for microservice anomalies. It uses a four-agent architecture with a Plan-and-Execute supervisor: Supervisor (planner → executor → finalize), Detection Agent (3-Sigma anomaly detection), Diagnose Agent (IAF-RCL/KE-FPC root cause analysis), and Report Agent (NL report generation).
 
 ## Running the Application
 
@@ -42,51 +42,78 @@ pip list | grep -E "langgraph|langchain|deepseek"
 
 ## Architecture
 
-### Three-Level Graph Structure
+### Three-Agent Architecture (Plan-and-Execute)
 
 ```
-Main Graph (main_graph.py)
-  ├── Supervisor Agent (supervisor_agent.py) - Intent recognition and routing
-  └── Diagnose Agent (diagnose_agent.py) - ReAct loop for tool execution
+Main Graph: START → supervisor → END
+
+Supervisor Agent (Plan-and-Execute):
+  START → planner(LLM生成计划)
+              │
+              ├── empty plan → direct_reply(reply字段) → END
+              │
+              └── has steps → executor(调度执行) ──→ executor(循环) ──→ finalize → END
+  Registry: detection adapter, diagnose adapter, report adapter
+  Memory: step_results[step_id] → dict
+
+Detection Agent (ReAct, 独立):
+  model → [tool_calls] → ToolNode → extract_results → model → ... → final(结构化异常摘要) → END
+  Tools: csv_reader_tool, three_sigma_tool
+  输出: { anomalies, summary, abnormal_kpi, inject_time }
+
+Diagnose Agent (ReAct, 独立):
+  model → [tool_calls] → ToolNode → extract_results → model → ... → final(结构化算法结果) → END
+  Tools: csv_reader_tool, rcd_tool, pc_tool, graph_visualization_tool
+  输出: { root_causes, edges, graph_visualizations, rcd_result, pc_result }
+
+Report Agent (单节点):
+  START → generate_report_node → END
+  输入: detection/diagnose 结构化数据 → LLM → 自然语言报告
+  输出: { final_response (NL report) }
 ```
 
 ### Key Components
 
 **Main Graph** (`app/agents/main_graph.py`)
-- Entry point that coordinates supervisor and diagnose subgraphs
-- Handles state conversion between graphs
-- Routes based on `action`: "call_diagnose", "have_diagnose_result", "interrupted", "respond"
-- Catches `GraphInterrupt` from diagnose agent for human-in-the-loop
-- Both subgraphs are expandable in LangGraph Studio
+- Simple wrapper: START → supervisor_node → END
+- Converts MainState to PlanExecuteState and back
+- Propagates sub-agent results from step_results and AI messages
 
-**Supervisor Agent** (`app/agents/supervisor_agent.py`)
-- Simple intent recognition using LLM (prompt loaded from `app/prompts/supervisor_system.md`)
-- Routes to diagnose_agent for analysis tasks or responds directly
-- NO parameter extraction - diagnose_agent handles all parameters
-- Handles "interrupted" action: relays the question from diagnose agent to the user
-- Keywords triggering diagnosis (fallback when LLM fails): "异常", "故障", "根因", "诊断", "分析", "rcd", "pc", "因果", "传播"
+**Supervisor Agent** (`app/agents/supervisor_plan_execute.py`) — Plan-and-Execute
+- **planner node**: Analyzes user request via LLM (temperature=0, no bind_tools), generates `List[PlanStep]`
+- **executor node**: Iterates through plan steps, invokes subgraphs via `SubAgentAdapter` interface (detection, diagnose, report)
+- **finalize node**: Extracts report result from step_results, generates HTML report, attaches topology visualization
+- **direct_reply node**: For non-agent queries (uses planner's `reply` field from JSON output)
+- **direct_reply node**: For simple conversational responses (no sub-agent needed)
+- Uses `step_results: Dict[int, Dict]` as generic memory between steps
+- Routing: `route_after_planner` (empty plan → direct_reply), `route_after_executor` (more steps → loop)
 
-**Diagnose Agent** (`app/agents/diagnose_agent.py`) — ReAct Loop
+**Subgraph Registry** (`app/agents/subgraph_registry.py`)
+- `SubAgentAdapter` interface: `build_input(step_input, step_results)` → `extract_result(subgraph_output)`
+- `DetectionAdapter`: Builds detection subgraph input, extracts anomaly results
+- `DiagnoseAdapter`: Builds diagnose subgraph input with optional detection summary from prior step
+- `get_adapter(agent_name)` and `get_subgraph(agent_name)` for lookup
 
-```
-START → model (LLM) ──有 tool_calls──→ tools (ToolNode) → extract_results → model
-              │                                                             ↑
-              └──无 tool_calls──→ final (报告合成) → END                    │
-              └──iteration >= max──→ final ─────────────────────────────────┘
-```
+**Detection Agent** (`app/agents/detection_agent.py`) — ReAct
+- Loads CSV data and runs 3-Sigma anomaly detection
+- Returns structured results: anomalies, abnormal_kpi, inject_time, csv_file_path
+- Final node builds natural-language summary (no LLM call)
 
-- **model_node**: Loads `diagnose_system.md`, binds `diagnose_tools` to LLM, invokes LLM
-- **tools**: LangGraph built-in `ToolNode(diagnose_tools)` executes tool calls
-- **extract_results_node**: Parses ToolMessages, updates state (csv_data, rcd_result, pc_result), tracks errors, triggers `interrupt()` for ask_user
-- **final_response_node**: LLM synthesizes results using `diagnose_refine.md`
-- Tools available:
-  - `read_csv` - Load metrics data (cached after first load)
-  - `rcd_algorithm` - Fast root cause inference (requires inject_time)
-  - `pc_algorithm` - Causal discovery (requires CSV data)
-  - `ask_user` - Request missing parameters via LangGraph interrupt()
-- CSV data is cached globally to avoid re-reading files
-- Tool errors are tracked but don't stop execution
-- Message compression (>2000 chars) reduces token usage
+**Diagnose Agent** (`app/agents/diagnose_agent.py`) — ReAct
+- Runs IAF-RCL and KE-FPC algorithms, generates graph visualizations
+- Returns **structured data** (not human-readable report) — report generation is the supervisor's job
+- Final node packages rcd_result, pc_result, graph_visualizations as JSON in `integrated_result`
+- Tools: csv_reader_tool, rcd_tool, pc_tool, graph_visualization_tool
+
+### Generic ReAct Nodes (`app/agents/nodes/react_nodes.py`)
+
+Reusable node factories for all ReAct agents:
+- `create_model_node(llm, system_prompt)` — Invokes LLM with bound tools
+- `extract_results_node(state)` — Parses ToolMessages, updates state fields
+- `create_final_response_node(refine_prompt_path, llm)` — LLM-based result synthesis (used by standalone diagnose agents)
+- `route_after_model(state)` → "tools" or "final"
+- `route_after_extract(state)` → "model", "interrupt", or "final"
+- `compress_messages(messages)` — Reduces token usage for long ToolMessages
 
 ### Algorithm Wrappers
 
@@ -116,7 +143,12 @@ LANGGRAPH_DEBUG=true
 **Model Factory** (`app/config/model_config.py`)
 - `get_deepseek_llm(**kwargs)` - Get configured DeepSeek LLM instance
 - `get_llm(provider, **kwargs)` - Generic LLM getter
-- Temperature defaults: intent=0.1, analysis=0, refinement=0.3
+- Temperature defaults: planner=0, detection=0, diagnose=0, synthesis=0.3
+
+**Agent Config** (`app/config/agents.yaml`)
+- YAML configuration for all three agents
+- Specifies state_schema, system_prompt, tools, model settings, max_iterations
+- Supervisor uses `type: plan_execute` with `sub_agents: [detection, diagnose]`
 
 ### Causal Discovery Tool (`app/tools/CausalDiscovery/`)
 
@@ -127,81 +159,99 @@ Separate causal discovery system with its own configuration:
 
 ## State Management
 
-**MainState** - Coordinates between subgraphs
+**MainState** - Main graph state
 - `user_input`, `messages`, `action`
-- Parameters: `csv_file_path`, `inject_time`, `gamma`, `alpha`, `dataset_type`
-- Results: `diagnose_result`, `interrupt_data`
+- Parameters: `csv_file_path`, `inject_time`, `abnormal_kpi`
+- Results: `diagnose_result`
 
-**SupervisorAgentState** - Intent recognition
-- Extends MainState fields
-- `response_message`, `continue_conversation`, `interrupt_data`
+**PlanExecuteState** - Plan-Execute supervisor state
+- Messages with plan execution history
+- Plan: `plan: List[PlanStep]`, `current_step_index`, `plan_reasoning`
+- Results: `step_results: Dict[int, Dict]` (generic memory, keyed by step_id)
+- Output: `final_response`, `continue_conversation`
 
-**DiagnoseAgentState** - ReAct loop state
-- Messages with tool call history (HumanMessage, AIMessage, ToolMessage)
-- Task description and parameters
-- Results: `csv_data`, `rcd_result`, `pc_result`, `integrated_result`
-- Control: `iteration_count`, `max_iterations`, `tool_errors`
-- Interrupt: `interrupted` (bool), `interrupt_data` (dict) — set when ask_user triggers
+**PlanStep** - Single plan step
+- `step_id`, `name`, `agent` ("detection"|"diagnose"|"direct_reply")
+- `input: Dict[str, Any]`, `status`, `error`
+
+**DetectionAgentState** - Detection agent state
+- Messages, task_description, tool results
+- `three_sigma_result`, `abnormal_kpi`, `inject_time`
+- Output: `final_response`
+
+**ReactAgentState** - Generic ReAct state (used by diagnose agent)
+- Messages, tool_results, tool_errors
+- Legacy fields: `rcd_result`, `pc_result`, `csv_file_path`, `inject_time`, `abnormal_kpi`
+- Output: `final_response`, `integrated_result`
+
+## Prompt Template System (`app/utils/prompt_template.py`)
+
+Centralizes result formatting logic:
+- `render_template(template_path, variables)` — Load .md template and replace `{{VAR}}` placeholders
+- `format_detection_summary(detection_result)` — Format detection results for template injection
+- `format_diagnose_summary(diagnose_result, ...)` — Format diagnose results for template injection
+- `_format_inject_time(inject_time)` — Format Unix timestamp as human-readable string
+
+## Prompt Files
+
+- `app/prompts/supervisor_planner.md` — Supervisor planner prompt (sub-agent descriptions, decision rules, JSON output format, reply field for direct_reply)
+- `app/prompts/supervisor_synthesis.md` — Supervisor report synthesis prompt template (legacy, not used by current finalize node)
+- `app/prompts/detection_system.md` — Detection agent system prompt
+- `app/prompts/diagnose_system.md` — Diagnose agent system prompt (no detailed tool params)
+- `app/prompts/diagnose_refine.md` — Legacy refine template (output format spec migrated to supervisor_synthesis.md)
 
 ## Important Implementation Details
 
-### ReAct Loop
-The diagnose agent uses LangGraph's built-in `ToolNode` for tool execution. The loop is:
+### Plan-Execute Flow
+1. Planner analyzes user request, generates `List[PlanStep]` (JSON output from LLM)
+2. If plan is empty → direct_reply node (uses planner's `reply` field as response)
+3. Executor iterates through plan steps (detection → diagnose → report):
+   - `adapter.build_input(step.input, step_results)` → subgraph input state
+   - `subgraph.invoke(input)` → subgraph output
+   - `adapter.extract_result(output)` → standardized result
+   - Result stored in `step_results[step_id]`
+4. Finalize node extracts report step result, generates HTML report, attaches topology visualization
+5. Topology visualization attached via `build_final_report_message()`
+
+### Step-to-Step Result Passing
+- Each step's result is stored in `step_results[step_id]`
+- Later steps can reference prior results via `step.input["from_step"]`
+- The DiagnoseAdapter automatically enriches task_description with detection summary when `from_step` is set
+- Shared parameters (csv_file_path, inject_time, abnormal_kpi) flow through step_results
+
+### ReAct Loop (Sub-agents)
+Detection and Diagnose agents use the same generic ReAct pattern:
 1. `model_node` invokes LLM with bound tools → returns AIMessage with `tool_calls`
-2. `route_model` routes to `tools` if tool_calls present, or `final` if done
+2. Route to `tools` if tool_calls present, or to final if done
 3. `ToolNode` executes the tool and produces ToolMessages
 4. `extract_results_node` parses results, updates state, detects interrupts
 5. Loop back to `model_node` (up to `max_iterations` iterations)
 
 ### CSV Data Caching
-CSV data is cached globally in `diagnose_agent.py` to avoid re-reading files within a single analysis session. The cache key is the resolved file path.
+CSV data is cached globally to avoid re-reading files within a single analysis session. The cache key is the resolved file path.
 
 ### Tool Parameter Validation
-Tools validate their own parameters BEFORE execution. If required parameters are missing, they return a JSON response with `error: "missing_parameter:xxx"` and `user_prompt` for asking the user. Pydantic `Field(...)` enforces required parameters at the tool schema level.
-
-### Human-in-the-Loop
-When `ask_user` tool is called, `extract_results_node` detects `requires_user_input` and calls LangGraph's `interrupt()`. The `main_graph.py` catches `GraphInterrupt` and sets `action="interrupted"`, routing back to the supervisor to relay the question to the user.
+Tools validate their own parameters BEFORE execution. If required parameters are missing, they return a JSON response with `error: "missing_parameter:xxx"`. Pydantic `Field(...)` enforces required parameters at the tool schema level.
 
 ### Error Handling
 - Tool errors are tracked in `state["tool_errors"]` list
-- Errors don't stop execution; LLM can retry, skip, or call ask_user
+- Executor marks step as "failed" but continues to next step
 - Final report includes both successful results and errors
 
 ### Message Compression
-Large tool messages (>1000 chars) are compressed in `model_node` before passing to LLM, keeping essential keys and truncating large lists to reduce token usage.
-
-### Prompt Files
-- `app/prompts/diagnose_system.md` — ReAct tool-calling protocol for the diagnose agent
-- `app/prompts/diagnose_refine.md` — Template for synthesizing final reports from tool results
-- `app/prompts/supervisor_system.md` — Intent recognition instructions for the supervisor
+Large tool messages (>2000 chars) are compressed in `model_node` before passing to LLM, keeping essential keys and truncating large lists to reduce token usage.
 
 ### Path Resolution
 `app/utils/path_resolver.py` handles data path resolution with support for relative paths like `data/file.csv` and `./data/file.csv`.
 
-## Adding New Tools
+## Adding New Sub-Agents
 
-1. Create tool function with Pydantic input schema
-2. Add to `diagnose_tools` list in `diagnose_agent.py`
-3. Update system prompt in `app/prompts/diagnose_system.md`
-4. Handle result extraction in `extract_results_node`
-
-Example:
-```python
-class MyToolInput(BaseModel):
-    param: str = Field(..., description="Description")
-
-def my_tool_func(param: str) -> str:
-    result = do_something(param)
-    return json.dumps({"success": True, "data": result})
-
-# Add to diagnose_tools
-StructuredTool.from_function(
-    func=my_tool_func,
-    name="my_tool",
-    description="Tool description",
-    args_schema=MyToolInput
-)
-```
+1. Create state TypedDict in `app/models/`
+2. Create SubAgentAdapter in `app/agents/subgraph_registry.py` (define `build_input` / `extract_result`)
+3. Register adapter in `REGISTRY` dict and add `get_subgraph()` case
+4. Create system prompt `.md` in `app/prompts/`
+5. Add agent config in `app/config/agents.yaml`
+6. Update `supervisor_planner.md` to describe the new agent
 
 ## Testing
 
@@ -209,8 +259,9 @@ Tests are located in `tests/`:
 - `test_csv_tool.py` - CSV reading functionality
 - `test_models.py` - LLM model factory
 - `test_main.py` - Main application entry
-- `test_integration.py` - End-to-end workflow tests
-- `test_new_workflow.py` - Supervisor-agent workflow
+- `test_integration.py` - End-to-end workflow tests + adapter tests
+- `test_new_workflow.py` - Plan-Execute routing, graph structure, prompt formatting
+- `test_detection_agent.py` - Detection agent + adapter contract tests
 
 ## Troubleshooting
 
@@ -220,18 +271,23 @@ Tests are located in `tests/`:
 
 **LangGraph routing issues**
 - Enable debug: `LANGGRAPH_DEBUG=true` in `.env`
-- Check action values in state using `langgraph dev`
-- Verify graph structure: `diagnose_agent.get_graph()` should contain nodes `["model", "tools", "extract_results", "final"]`
+- Check state values using `langgraph dev`
+- Verify graph structure: each agent's `get_graph()` should contain expected nodes
 
-**ReAct loop issues**
+**Supervisor planner not generating valid plans**
+- Check that LLM returns valid JSON (test with `langgraph dev`)
+- Verify `supervisor_planner.md` prompt is loaded correctly
+- Check `_parse_plan_json()` handles markdown-wrapped JSON
+
+**Executor not invoking subgraphs**
+- Verify `get_subgraph(agent_name)` returns the correct LazyGraph
+- Check that `adapter.build_input()` produces valid subgraph state
+- Ensure subgraph state schema matches adapter output
+
+**ReAct loop issues (sub-agents)**
 - Check that LLM returns proper tool_calls (not all providers support function calling)
-- Verify `diagnose_tools` are correctly bound: `llm.bind_tools(diagnose_tools)` in `model_node`
-- If LLM doesn't call tools, check `diagnose_system.md` prompt for clear tool instructions
-
-**Human-in-the-loop not working**
-- `ask_user` tool must set `requires_user_input: true` in response
-- `extract_results_node` must call `interrupt()` for `main_graph.py` to catch `GraphInterrupt`
-- Ensure `main_graph.py` has the `except GraphInterrupt` handler in `diagnose_node`
+- Verify tools are correctly bound: `llm.bind_tools(tools)` in `model_node`
+- If LLM doesn't call tools, check system prompt for clear tool instructions
 
 **LLM not responding**
 - Verify API key in `.env`

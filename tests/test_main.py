@@ -14,10 +14,10 @@ def test_main_imports():
     assert app.main is not None
 
 
-def test_graph_import():
-    """Test that graph can be imported"""
-    from app.graph.builder import graph
-    assert graph is not None
+def test_main_graph_import():
+    """Test that main graph can be imported"""
+    from app.agents.main_graph import main_graph
+    assert main_graph is not None
 
 
 def test_config_import():
@@ -26,9 +26,17 @@ def test_config_import():
     assert settings is not None
 
 
-def test_tools_import():
-    """Test that tools can be imported"""
-    from app.tools import read_csv_headers, rcd_analyze, pc_analyze
-    assert read_csv_headers is not None
-    assert rcd_analyze is not None
-    assert pc_analyze is not None
+def test_agents_import():
+    """Test that all agents can be imported"""
+    from app.agents import main_graph, supervisor_agent, detection_agent, diagnose_agent
+    assert main_graph is not None
+    assert supervisor_agent is not None
+    assert detection_agent is not None
+    assert diagnose_agent is not None
+
+
+def test_plan_execute_state_import():
+    """Test that PlanExecuteState can be imported"""
+    from app.models.plan_execute_state import PlanExecuteState, PlanStep
+    assert PlanExecuteState is not None
+    assert PlanStep is not None

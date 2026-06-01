@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 from app.agents.main_graph import main_graph
 from app.utils.logger import get_logger
+from app.utils.llm_logger import reset_trace_logger
 
 logger = get_logger(__name__)
 
@@ -17,7 +18,8 @@ def print_banner():
     print("AIOps 根因分析智能助手 v1.0.0")
     print("=" * 60)
     print()
-    print("我可以帮您进行故障根因分析：")
+    print("我可以帮您进行异常检测和故障根因分析：")
+    print("- 使用 3-Sigma 算法检测异常指标")
     print("- 使用 IAF-RCL 算法识别根因指标")
     print("- 使用 KE-FPC 算法生成故障传播图")
     print("- 综合多个算法结果进行精确定位")
@@ -25,6 +27,7 @@ def print_banner():
     print("请提供您的监控数据 CSV 文件。")
     print()
     print("示例：")
+    print('  "2026年1月5日5:48发生了故障，请检测异常指标"')
     print('  "分析 ./data/metrics.csv 文件的根因"')
     print('  "诊断 data.csv，注入时间: 100"')
     print('  "分析 metrics.csv，gamma: 5, alpha: 0.05"')
@@ -67,6 +70,9 @@ def run_conversation():
 
             # Add user message to history
             messages.append(HumanMessage(content=user_input))
+
+            # Start a fresh trace session for this request
+            reset_trace_logger()
 
             # Prepare state for main graph
             # Simplified state: only user_input is required
@@ -114,6 +120,9 @@ def run_single_request(user_request: str) -> str:
     load_dotenv()
 
     logger.info(f"Processing single request: {user_request}")
+
+    # Start a fresh trace session for this request
+    reset_trace_logger()
 
     messages = [HumanMessage(content=user_request)]
 

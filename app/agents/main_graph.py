@@ -1,19 +1,18 @@
-"""Main Graph - Single entry point with nested subgraphs
+"""Main Graph - Single supervisor node wrapper
 
-This is the main graph that contains nested subgraphs:
-- supervisor_agent: Main orchestrator (expandable in Studio)
-- diagnose_agent: ReAct loop root cause analysis subagent (expandable in Studio)
+The main graph wraps the Plan-Execute supervisor. The supervisor
+generates an execution plan and dispatches to sub-agents (detection,
+diagnose) via a plan-execute loop.
 
-The main graph handles routing between subgraphs based on state.
+Graph structure:
+START → supervisor → END
 """
 
-from typing import Dict, Any, List, Optional, Literal, TypedDict, Annotated, Sequence
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from typing import Dict, Any, List, Optional, TypedDict, Annotated, Sequence
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
 from langgraph.graph import StateGraph, END, add_messages
 from langgraph.graph.ui import AnyUIMessage, ui_message_reducer
-from app.agents.supervisor_agent import SupervisorAgentState, supervisor_agent as supervisor_subgraph
-from app.models.react_agent_state import ReactAgentState
-from app.agents.diagnose_agent import diagnose_agent as diagnose_subgraph
+
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -38,80 +37,30 @@ class MainState(TypedDict, total=False):
     messages: Annotated[List[BaseMessage], add_messages]
     ui: Annotated[Sequence[AnyUIMessage], ui_message_reducer]
     continue_conversation: bool
+    # These fields are kept for backward compatibility with LangGraph Studio
     action: str
     csv_file_path: Optional[str]
     inject_time: Optional[float]
     abnormal_kpi: Optional[str]
-    gamma: Optional[int]
-    alpha: Optional[float]
-    dataset_type: Optional[str]
     diagnose_result: Optional[Dict[str, Any]]
-
-
-def state_to_supervisor(state: MainState, has_diagnose_result: bool = False) -> SupervisorAgentState:
-    """Convert main state to supervisor state"""
-    return {
-        "user_input": state.get("user_input", ""),
-        "messages": state.get("messages", []),
-        "action": state.get("action", "respond"),
-        "csv_file_path": state.get("csv_file_path"),
-        "inject_time": state.get("inject_time"),
-        "abnormal_kpi": state.get("abnormal_kpi"),
-        "gamma": state.get("gamma"),
-        "alpha": state.get("alpha"),
-        "dataset_type": state.get("dataset_type"),
-        "diagnose_result": state.get("diagnose_result") if has_diagnose_result else None,
-        "response_message": None,
-        "continue_conversation": True
-    }
-
-
-def state_from_supervisor(main_state: MainState, supervisor_state: SupervisorAgentState) -> MainState:
-    """Convert supervisor state back to main state"""
-    main_state["user_input"] = supervisor_state.get("user_input", "")
-    main_state["action"] = supervisor_state.get("action", "respond")
-    main_state["csv_file_path"] = supervisor_state.get("csv_file_path")
-    main_state["inject_time"] = supervisor_state.get("inject_time")
-    main_state["abnormal_kpi"] = supervisor_state.get("abnormal_kpi")
-    main_state["gamma"] = supervisor_state.get("gamma")
-    main_state["alpha"] = supervisor_state.get("alpha")
-    main_state["dataset_type"] = supervisor_state.get("dataset_type")
-    main_state["continue_conversation"] = supervisor_state.get("continue_conversation", True)
-    # Don't blindly copy messages — the add_messages reducer would duplicate.
-    # Only append supervisor's new AIMessages that weren't in the input.
-    return main_state
-
-
-def state_to_diagnose(state: MainState) -> ReactAgentState:
-    """Convert main state to diagnose state."""
-    task = state.get("user_input", "")
-    if not task:
-        for msg in reversed(state.get("messages", [])):
-            if isinstance(msg, HumanMessage):
-                task = _get_text(msg.content)
-                break
-
-    return {
-        "messages": [],
-        "task_description": task,
-        "csv_file_path": state.get("csv_file_path"),
-        "inject_time": state.get("inject_time"),
-        "abnormal_kpi": state.get("abnormal_kpi"),
-        "gamma": state.get("gamma", 5),
-        "alpha": state.get("alpha", 0.05),
-        "csv_headers": None,
-        "rcd_result": None,
-        "three_sigma_result": None,
-        "pc_result": None,
-        "graph_visualization": None,
-        "tool_errors": [],
-        "integrated_result": None,
-    }
+    # New structured fields from sub-agents
+    anomaly_report: Optional[List[Dict[str, Any]]]
+    fault_type: Optional[str]
+    root_causes: Optional[List[Dict[str, Any]]]
+    propagation_path: Optional[List[Dict[str, Any]]]
+    graph_visualizations: Optional[List[Dict[str, Any]]]
 
 
 def supervisor_node(state: MainState) -> MainState:
-    """Node that wraps the supervisor subgraph."""
-    logger.info("MAIN: Entering supervisor subgraph")
+    """Node that wraps the Plan-Execute supervisor subgraph.
+
+    Converts MainState to PlanExecuteState, invokes the supervisor,
+    and maps results back to MainState.
+    """
+    from app.agents.supervisor_plan_execute import plan_execute_agent
+    from app.models.plan_execute_state import PlanExecuteState
+
+    logger.info("MAIN: Entering Plan-Execute supervisor")
 
     # Ensure user_input from messages (for Studio where only messages is set)
     if not state.get("user_input"):
@@ -120,111 +69,97 @@ def supervisor_node(state: MainState) -> MainState:
                 state["user_input"] = _get_text(msg.content)
                 break
 
+    user_input = state.get("user_input", "")
+
     # Record which messages already exist so we only add new ones
     existing_ids = {getattr(m, "id", None) for m in state.get("messages", [])}
 
-    has_diagnose_result = state.get("diagnose_result") is not None
-    supervisor_state = state_to_supervisor(state, has_diagnose_result)
-    result = supervisor_subgraph.invoke(supervisor_state)
-    state = state_from_supervisor(state, result)
+    # Convert to PlanExecuteState
+    supervisor_state: PlanExecuteState = {
+        "messages": state.get("messages", []),
+        "ui": state.get("ui", []),
+        "user_input": user_input,
+        "task_description": user_input,
+        "plan": [],
+        "current_step_index": -1,
+        "plan_reasoning": "",
+        "step_results": {},
+        "final_response": None,
+        "continue_conversation": True,
+    }
 
-    new_ai = [
+    # Invoke supervisor
+    result = plan_execute_agent.invoke(supervisor_state)
+
+    # Map results back to main state
+    state["continue_conversation"] = result.get("continue_conversation", True)
+    state["final_response"] = result.get("final_response")
+    state["action"] = "respond"
+
+    # Propagate sub-agent results from step_results
+    step_results = result.get("step_results", {})
+    for step in result.get("plan", []):
+        sr = step_results.get(step["step_id"], {})
+        if step["agent"] == "detection":
+            if sr.get("csv_file_path"):
+                state["csv_file_path"] = sr["csv_file_path"]
+            if sr.get("inject_time"):
+                state["inject_time"] = sr["inject_time"]
+            if sr.get("abnormal_kpi"):
+                state["abnormal_kpi"] = sr["abnormal_kpi"]
+            if sr.get("anomaly_report"):
+                state["anomaly_report"] = sr["anomaly_report"]
+        elif step["agent"] == "diagnose":
+            state["diagnose_result"] = sr
+            if sr.get("csv_file_path"):
+                state["csv_file_path"] = sr["csv_file_path"]
+            if sr.get("inject_time"):
+                state["inject_time"] = sr["inject_time"]
+            if sr.get("abnormal_kpi"):
+                state["abnormal_kpi"] = sr["abnormal_kpi"]
+            if sr.get("fault_type"):
+                state["fault_type"] = sr["fault_type"]
+            if sr.get("root_causes"):
+                state["root_causes"] = sr["root_causes"]
+            if sr.get("propagation_path"):
+                state["propagation_path"] = sr["propagation_path"]
+            if sr.get("graph_visualizations"):
+                state["graph_visualizations"] = sr["graph_visualizations"]
+
+    # Propagate ALL new messages (AIMessage, ToolMessage, etc.) so Studio shows
+    # the full intermediate process — tool calls, tool results, and AI reasoning.
+    new_msgs = [
         m for m in result.get("messages", [])
-        if isinstance(m, AIMessage)
-        and m.content
-        and getattr(m, "id", None) not in existing_ids
+        if getattr(m, "id", None) not in existing_ids
+        and not isinstance(m, HumanMessage)  # skip HumanMessage (already in state)
     ]
-    if new_ai:
-        state["messages"] = state.get("messages", []) + new_ai
-        logger.info(f"MAIN: Appended {len(new_ai)} supervisor message(s) to chat")
+    if new_msgs:
+        state["messages"] = new_msgs
+        logger.info(f"MAIN: Propagated {len(new_msgs)} messages to chat "
+                     f"(tools={sum(1 for m in new_msgs if isinstance(m, ToolMessage))}, "
+                     f"ai={sum(1 for m in new_msgs if isinstance(m, AIMessage))})")
+
+    # If no messages were propagated but we have a final_response, add it
+    if not new_msgs and result.get("final_response"):
+        state["messages"] = [AIMessage(content=result["final_response"])]
 
     logger.info(f"MAIN: Supervisor completed, action={state.get('action')}")
     return state
 
 
-def diagnose_node(state: MainState) -> MainState:
-    """Node that wraps the diagnose subgraph."""
-    logger.info("MAIN: Entering diagnose subgraph")
-
-    if not state.get("user_input"):
-        for msg in reversed(state.get("messages", [])):
-            if isinstance(msg, HumanMessage):
-                state["user_input"] = _get_text(msg.content)
-                break
-
-    logger.info(f"MAIN: Diagnose — user_input='{str(state.get('user_input', ''))[:80]}'")
-
-    diagnose_state = state_to_diagnose(state)
-
-    result = diagnose_subgraph.invoke(diagnose_state)
-
-    # Log the diagnose result for debugging
-    logger.info(f"MAIN: Diagnose result keys: {result.keys() if isinstance(result, dict) else 'not a dict'}")
-    logger.info(f"MAIN: Diagnose final_response: {result.get('final_response', 'None')[:200] if result.get('final_response') else 'None'}")
-    logger.info(f"MAIN: Diagnose messages count: {len(result.get('messages', []))}")
-
-    # Store the full result
-    state["diagnose_result"] = result
-
-    # Extract results to main state for supervisor access
-    if result.get("csv_file_path"):
-        state["csv_file_path"] = result["csv_file_path"]
-    if result.get("inject_time"):
-        state["inject_time"] = result["inject_time"]
-    if result.get("abnormal_kpi"):
-        state["abnormal_kpi"] = result["abnormal_kpi"]
-    if result.get("gamma"):
-        state["gamma"] = result["gamma"]
-    if result.get("alpha"):
-        state["alpha"] = result["alpha"]
-
-    # Chat 回复由 supervisor 写入 messages（含拓扑图），此处仅保存结果
-    state["action"] = "have_diagnose_result"
-
-    logger.info("MAIN: Diagnose completed, will return to supervisor")
-    return state
-
-
-def route_main(state: MainState) -> Literal["supervisor_agent", "diagnose_agent", END]:
-    """
-    Route function for main graph.
-    - "call_diagnose" → diagnose_agent
-    - "have_diagnose_result" → supervisor_agent
-    - otherwise → END
-    """
-    action = state.get("action", "")
-    if action == "call_diagnose":
-        return "diagnose_agent"
-    if action == "have_diagnose_result":
-        return "supervisor_agent"
-    return END
-
-
 def build_main_graph() -> StateGraph:
-    """Build the main graph with nested subgraphs."""
-    logger.info("Building main graph with nested subgraphs")
+    """Build the main graph with a single supervisor node."""
+    logger.info("Building main graph (single supervisor node)")
 
     builder = StateGraph(MainState)
 
-    builder.add_node("supervisor_agent", supervisor_node)
-    builder.add_node("diagnose_agent", diagnose_node)
+    builder.add_node("supervisor", supervisor_node)
 
-    builder.set_entry_point("supervisor_agent")
-
-    builder.add_conditional_edges(
-        "supervisor_agent",
-        route_main,
-        {
-            "diagnose_agent": "diagnose_agent",
-            "supervisor_agent": "supervisor_agent",
-            END: END
-        }
-    )
-
-    builder.add_edge("diagnose_agent", "supervisor_agent")
+    builder.set_entry_point("supervisor")
+    builder.add_edge("supervisor", END)
 
     graph = builder.compile()
-    logger.info("Main graph compiled with nested subgraphs")
+    logger.info("Main graph compiled")
     return graph
 
 

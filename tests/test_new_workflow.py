@@ -1,289 +1,310 @@
-"""Tests for the new workflow: LLM-driven tool calling with human-in-the-loop
+"""Tests for the Plan-Execute architecture.
 
 These tests cover:
-1. Supervisor routing to diagnose for diagnosis requests
-2. Supervisor NOT validating parameters
-3. Diagnose ReAct loop: CSV → RCD → PC → final
-4. Human-in-the-loop when parameters are missing
-5. Tool error handling and continuation
-6. Final result refinement with all results and errors
+1. Plan-Execute supervisor graph structure
+2. Detection agent compilation and output
+3. Diagnose agent compilation and structured results
+4. Subgraph registry and adapters
+5. Plan parsing and routing logic
+6. Prompt template formatting
 """
 
+import json
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from app.agents.main_graph import main_graph
-from app.agents.supervisor_agent import supervisor_agent, is_diagnosis_intent
-from app.agents.diagnose_agent import diagnose_agent
 
 
-class TestSupervisorAgentWorkflow:
-    """Test Supervisor Agent intent recognition (no parameter validation)"""
+class TestSupervisorAgent:
+    """Test Plan-Execute Supervisor Agent"""
 
-    def test_diagnosis_intent_recognition(self):
-        """Test that supervisor correctly identifies diagnosis intent"""
-        assert is_diagnosis_intent("分析一下今天的故障")
-        assert is_diagnosis_intent("帮我定位根因")
-        assert is_diagnosis_intent("Please analyze the anomaly")
-        assert is_diagnosis_intent("使用RCD算法诊断")
+    def test_supervisor_graph_structure(self):
+        """Verify supervisor has planner, executor, finalize nodes."""
+        from app.agents.supervisor_plan_execute import plan_execute_agent
 
-    def test_non_diagnosis_intent(self):
-        """Test that supervisor correctly identifies non-diagnosis intent"""
-        assert not is_diagnosis_intent("你好")
-        assert not is_diagnosis_intent("天气怎么样")
-        assert not is_diagnosis_intent("hello")
+        graph = plan_execute_agent.get_graph()
+        nodes = list(graph.nodes.keys())
 
-    def test_supervisor_routes_to_diagnose(self):
-        """Test supervisor routes to diagnose for diagnosis requests"""
+        assert "planner" in nodes, "Supervisor must have planner node"
+        assert "executor" in nodes, "Supervisor must have executor node"
+        assert "finalize" in nodes, "Supervisor must have finalize node"
+        assert "direct_reply" in nodes, "Supervisor must have direct_reply node"
+
+    def test_supervisor_state_schema(self):
+        """Verify PlanExecuteState has required fields."""
+        from app.models.plan_execute_state import PlanExecuteState
+
+        schema = PlanExecuteState.__annotations__
+        assert "messages" in schema
+        assert "plan" in schema
+        assert "step_results" in schema
+        assert "current_step_index" in schema
+        assert "plan_reasoning" in schema
+        assert "final_response" in schema
+
+
+class TestDetectionAgent:
+    """Test Detection Agent compilation"""
+
+    def test_detection_graph_structure(self):
+        """Verify detection agent has expected nodes."""
+        with patch('app.config.model_config.get_llm') as mock_get_llm:
+            mock_llm = Mock()
+            mock_llm.bind_tools.return_value = mock_llm
+            mock_get_llm.return_value = mock_llm
+
+            from app.agents.detection_agent import build_detection_agent
+            graph = build_detection_agent()
+            g = graph.get_graph()
+            nodes = list(g.nodes.keys())
+
+            assert "model" in nodes
+            assert "tools" in nodes
+            assert "extract_results" in nodes
+            assert "final" in nodes
+
+    def test_detection_state_schema(self):
+        """Verify DetectionAgentState has required fields."""
+        from app.models.detection_agent_state import DetectionAgentState
+
+        schema = DetectionAgentState.__annotations__
+        assert "three_sigma_result" in schema
+        assert "csv_file_path" in schema
+        assert "inject_time" in schema
+        assert "abnormal_kpi" in schema
+        assert "final_response" in schema
+
+
+class TestDiagnoseAgent:
+    """Test Diagnose Agent compilation and structured results"""
+
+    def test_diagnose_final_returns_structured_results(self):
+        """Verify diagnose final node produces structured output (no LLM call)."""
+        from app.agents.diagnose_agent import _create_diagnose_structured_final_node
+
+        final_node = _create_diagnose_structured_final_node()
+
         state = {
-            "user_input": "今天下午3点发生异常，请分析数据文件",
+            "rcd_result": {"success": True, "root_causes": ["metric_a"]},
+            "pc_result": {"success": True, "root_causes": ["metric_b"], "edges": [["metric_b", "metric_c"]]},
+            "csv_file_path": "data/test.csv",
+            "inject_time": 100.0,
+            "abnormal_kpi": "metric_a",
+            "graph_visualizations": [],
+            "tool_errors": [],
             "messages": [],
-            "action": "respond",
-            "csv_file_path": None,
-            "inject_time": None,
-            "gamma": None,
-            "alpha": None,
-            "dataset_type": None,
-            "diagnose_result": None,
-            "response_message": None,
-            "continue_conversation": True
         }
 
-        result = supervisor_agent.invoke(state)
+        result = final_node(state)
 
-        # Should route to diagnose (action != "respond")
-        assert result["action"] in ["call_diagnose", "respond"]
-        # Should NOT extract parameters - csv_file_path remains None
-        # Parameter extraction is now diagnose's responsibility
-        assert result["csv_file_path"] is None
+        assert result["final_response"] is not None
+        assert result["integrated_result"] is not None
 
-    def test_supervisor_does_not_extract_parameters(self):
-        """Test that supervisor does NOT extract/validate parameters"""
-        state = {
-            "user_input": "分析 data/test.csv 文件，注入时间100",
-            "messages": [],
-            "action": "respond",
-            "csv_file_path": None,
-            "inject_time": None,
-            "gamma": None,
-            "alpha": None,
-            "dataset_type": None,
-            "diagnose_result": None,
-            "response_message": None,
-            "continue_conversation": True
-        }
+        # Structured output — no LLM call
+        assert "metric_a" in result["final_response"]
+        assert result["fault_type"] is not None  # should be inferred from metric names
+        assert result["root_causes"] is not None
+        assert len(result["root_causes"]) >= 1
+        assert result["propagation_path"] is not None
 
-        result = supervisor_agent.invoke(state)
-
-        # Supervisor should route to diagnose
-        assert result["action"] == "call_diagnose"
-        # But should NOT extract parameters (remains None)
-        # The diagnose_agent will handle extraction
-        assert result["csv_file_path"] is None
-        assert result["inject_time"] is None
+        # integrated_result should be JSON with structured data
+        integrated = json.loads(result["integrated_result"])
+        assert isinstance(integrated, dict)
+        assert integrated["rcd_result"] == state["rcd_result"]
+        assert integrated["pc_result"] == state["pc_result"]
+        assert integrated["csv_file_path"] == state["csv_file_path"]
 
 
-class TestDiagnoseAgentReActLoop:
-    """Test Diagnose Agent ReAct loop workflow"""
+class TestSubgraphRegistry:
+    """Test subgraph registry and adapters"""
 
-    def test_diagnose_state_initialization(self):
-        """Test diagnose state is properly initialized"""
-        from app.agents.main_graph import state_to_diagnose
+    def test_detection_adapter_build_input(self):
+        """Verify DetectionAdapter builds correct input."""
+        from app.agents.subgraph_registry import get_adapter
 
-        main_state = {
-            "user_input": "分析 data/test.csv，注入时间100",
-            "csv_file_path": None,
-            "inject_time": 100,
-            "gamma": 5,
-            "alpha": 0.05,
-            "dataset_type": None
-        }
+        adapter = get_adapter("detection")
+        step_input = {"task_description": "Test", "data_path": "data/test.csv"}
+        result = adapter.build_input(step_input, {})
 
-        diagnose_state = state_to_diagnose(main_state)
+        assert result["task_description"] == "Test"
+        assert result["csv_file_path"] == "data/test.csv"
+        assert result["max_iterations"] == 5
 
-        # Should have task_description set
-        assert diagnose_state["task_description"] == main_state["user_input"]
-        # Should start with no results
-        assert diagnose_state["rcd_result"] is None
-        assert diagnose_state["pc_result"] is None
-        assert diagnose_state["tool_errors"] == []
+    def test_diagnose_adapter_build_input_with_detection(self):
+        """Verify DiagnoseAdapter enriches task with detection context."""
+        from app.agents.subgraph_registry import get_adapter
 
-    @patch('app.agents.diagnose_agent.get_deepseek_llm')
-    def test_diagnose_llm_decides_tool_calling(self, mock_llm):
-        """Test that LLM autonomously decides which tools to call"""
-        from app.agents.diagnose_agent import DiagnoseAgentState
-
-        # Mock LLM to return a tool call
-        mock_client = Mock()
-        mock_response = Mock()
-        mock_response.content = ""
-
-        # Create mock tool_calls
-        mock_tool_call = Mock()
-        mock_tool_call.name = "read_csv"
-        mock_tool_call.args = {"data_path": "data/test.csv"}
-        mock_tool_call.id = "call_123"
-
-        mock_response.tool_calls = [mock_tool_call]
-        mock_client.invoke.return_value = mock_response
-
-        mock_llm_instance = Mock()
-        mock_llm_instance.get_client.return_value = mock_client
-        mock_llm_instance.bind_tools.return_value = mock_llm_instance
-        mock_llm.return_value = mock_llm_instance
-
-        mock_get_deepseek = Mock(return_value=mock_llm_instance)
-
-        with patch('app.agents.diagnose_agent.get_deepseek_llm', mock_get_deepseek):
-            from app.agents.diagnose_agent import model_node
-
-            state = DiagnoseAgentState(
-                messages=[],
-                task_description="分析 data/test.csv",
-                iteration_count=0
-            )
-
-            result = model_node(state)
-
-            # Should have added the AIMessage with tool_calls
-            assert len(result["messages"]) > 0
-            assert result["iteration_count"] == 1
-
-
-class TestHumanInTheLoop:
-    """Test human-in-the-loop functionality"""
-
-    def test_ask_user_tool_triggers_interrupt(self):
-        """Test that ask_user tool triggers interrupt for missing params"""
-        from app.agents.diagnose_agent import ask_user_tool_func
-
-        result = ask_user_tool_func(question="请提供CSV文件路径")
-        result_dict = json.loads(result)
-
-        assert result_dict["status"] == "interrupted"
-        assert "请提供CSV文件路径" in result_dict["question"]
-
-    def test_ask_user_in_diagnose_tools(self):
-        """Test ask_user tool is available in diagnose tools"""
-        from app.agents.diagnose_agent import diagnose_tools
-
-        tool_names = [tool.name for tool in diagnose_tools]
-        assert "ask_user" in tool_names
-
-
-class TestToolErrorHandling:
-    """Test tool execution error handling"""
-
-    @patch('app.agents.diagnose_agent.pd.read_csv')
-    def test_csv_read_error_is_caught(self, mock_read_csv):
-        """Test that CSV read errors are caught and don't crash the system"""
-        from app.agents.diagnose_agent import read_csv_tool_func, extract_results_node, DiagnoseAgentState
-
-        # Mock CSV read to raise exception
-        mock_read_csv.side_effect = FileNotFoundError("File not found")
-
-        result = read_csv_tool_func(data_path="data/nonexistent.csv")
-        result_dict = json.loads(result)
-
-        # Should return error result, not crash
-        assert result_dict["success"] == False
-        assert "error" in result_dict
-
-    @patch('app.agents.diagnose_agent.run_rcd_analysis')
-    def test_rcd_error_is_caught_and_logged(self, mock_rcd):
-        """Test that RCD errors are caught and logged"""
-        from app.agents.diagnose_agent import rcd_tool_func, extract_results_node, DiagnoseAgentState
-
-        # Mock RCD to raise exception
-        mock_rcd.side_effect = Exception("RCD algorithm failed")
-
-        # First cache some data
-        from app.agents.diagnose_agent import cache_csv_data
-        import pandas as pd
-        cache_csv_data("test.csv", pd.DataFrame({"a": [1, 2, 3]}))
-
-        result = rcd_tool_func(inject_time=100.0)
-        result_dict = json.loads(result)
-
-        # Should return error result
-        assert result_dict["algorithm"] == "IAF-RCL"
-        assert result_dict["success"] == False
-        assert "error" in result_dict
-
-
-class TestFinalResultRefinement:
-    """Test final result refinement with all results and errors"""
-
-    @patch('app.agents.diagnose_agent.get_deepseek_llm')
-    def test_final_refinement_with_partial_success(self, mock_llm):
-        """Test final refinement when only some tools succeeded"""
-        mock_llm_instance = Mock()
-        mock_llm_instance.invoke.return_value = "Final analysis report"
-
-        with patch('app.agents.diagnose_agent.get_deepseek_llm', return_value=mock_llm_instance):
-            from app.agents.diagnose_agent import final_response_node, DiagnoseAgentState
-
-            state = DiagnoseAgentState(
-                messages=[],
-                task_description="分析任务",
-                rcd_result={
-                    "success": True,
-                    "root_causes": ["metric_a", "metric_b"]
-                },
-                pc_result={
-                    "success": False,
-                    "error": "PC algorithm failed"
-                },
-                tool_errors=[
-                    {"tool": "pc_algorithm", "error": "PC algorithm failed"}
+        adapter = get_adapter("diagnose")
+        step_input = {"task_description": "Root cause", "from_step": 1}
+        step_results = {
+            1: {
+                "anomaly_report": [
+                    {"metric": "cpu_usage", "max_z_score": 5.0},
+                    {"metric": "mem_usage", "max_z_score": 3.0},
                 ],
-                csv_data=None
-            )
+                "csv_file_path": "data/test.csv"
+            }
+        }
+        result = adapter.build_input(step_input, step_results)
 
-            result = final_response_node(state)
+        assert "cpu_usage" in result["task_description"]
+        assert "异常检测结果" in result["task_description"]
+        assert result["csv_file_path"] == "data/test.csv"
 
-            # Should generate integrated result
-            assert result["integrated_result"] is not None
-            # Should include RCD success and PC failure info
-            assert "metric_a" in result["integrated_result"] or "Final analysis report" in result["integrated_result"]
+    def test_diagnose_adapter_build_input_without_detection(self):
+        """Verify DiagnoseAdapter works without prior detection."""
+        from app.agents.subgraph_registry import get_adapter
+
+        adapter = get_adapter("diagnose")
+        step_input = {
+            "task_description": "Root cause",
+            "data_path": "data/test.csv",
+            "inject_time": 100.0,
+        }
+        result = adapter.build_input(step_input, {})
+
+        assert result["task_description"] == "Root cause"
+        assert result["csv_file_path"] == "data/test.csv"
+        assert result["inject_time"] == 100.0
+
+    def test_registry_has_both_adapters(self):
+        """Verify registry contains both detection and diagnose."""
+        from app.agents.subgraph_registry import REGISTRY
+
+        assert "detection" in REGISTRY
+        assert "diagnose" in REGISTRY
 
 
-class TestEndToEndWorkflow:
-    """Test end-to-end workflow scenarios"""
+class TestPromptTemplate:
+    """Test prompt template utilities"""
 
-    def test_diagnosis_request_routes_to_diagnose(self):
-        """Test: User inputs diagnosis request → supervisor routes to diagnose"""
-        from app.agents.main_graph import MainState, main_graph
+    def test_format_detection_summary_with_data(self):
+        """Test detection summary formatting."""
+        from app.utils.prompt_template import format_detection_summary
 
-        state = MainState(
-            user_input="今天下午3点，微服务系统发生异常，请分析根因",
-            messages=[],
-            continue_conversation=True,
-            action="respond"
-        )
+        detection_result = {
+            "success": True,
+            "summary": "3-Sigma detection: found 5 anomalies",
+            "csv_file_path": "data/test.csv",
+            "inject_time": 100.0,
+            "abnormal_kpi": "cpu_usage",
+        }
 
-        result = main_graph.invoke(state)
+        summary = format_detection_summary(detection_result)
+        assert "3-Sigma detection" in summary
+        assert "5 anomalies" in summary
 
-        # Should route to diagnose (action will be "call_diagnose")
-        assert result["action"] in ["call_diagnose", "have_diagnose_result", "respond"]
+    def test_format_detection_summary_none(self):
+        """Test detection summary with None input."""
+        from app.utils.prompt_template import format_detection_summary
 
-    @patch('app.agents.diagnose_agent.get_deepseek_llm')
-    @patch('app.agents.diagnose_agent.pd.read_csv')
-    def test_diagnose_executes_tools_in_sequence(self, mock_read_csv, mock_llm):
-        """Test: Diagnose executes tools in sequence CSV → RCD → PC"""
-        # This would require full integration test with actual LLM
-        # For now, just verify the graph structure
-        from app.agents.diagnose_agent import diagnose_agent
+        summary = format_detection_summary(None)
+        assert "未执行" in summary
 
-        # The graph should be compiled
-        assert diagnose_agent is not None
+    def test_format_diagnose_summary_with_data(self):
+        """Test diagnose summary formatting."""
+        from app.utils.prompt_template import format_diagnose_summary
 
-        # Should have the expected nodes
-        graph = diagnose_agent
-        nodes = graph.nodes
-        assert "model" in nodes
-        assert "tools" in nodes
-        assert "extract_results" in nodes
-        assert "final" in nodes
+        diagnose_result = {
+            "rcd_result": {"success": True, "root_causes": ["metric_a"]},
+            "pc_result": {"success": True, "root_causes": ["metric_b"], "edges": [["metric_b", "metric_c"]]},
+            "csv_file_path": "data/test.csv",
+            "inject_time": 100.0,
+            "abnormal_kpi": "metric_a",
+        }
+
+        summary = format_diagnose_summary(diagnose_result)
+        assert "IAF-RCL" in summary
+        assert "KE-FPC" in summary
+        assert "metric_a" in summary
+
+    def test_format_diagnose_summary_none(self):
+        """Test diagnose summary with None input."""
+        from app.utils.prompt_template import format_diagnose_summary
+
+        summary = format_diagnose_summary(None)
+        assert "未执行" in summary
+
+
+class TestReactNodes:
+    """Test generic ReAct node functions"""
+
+    def test_route_after_model_with_tool_calls(self):
+        """Test routing when LLM makes tool calls."""
+        from app.agents.nodes.react_nodes import route_after_model
+        from langchain_core.messages import AIMessage
+
+        mock_msg = Mock(spec=AIMessage)
+        mock_msg.tool_calls = [{"name": "test_tool"}]
+
+        state = {
+            "messages": [mock_msg],
+            "iteration_count": 1,
+            "max_iterations": 10,
+        }
+
+        result = route_after_model(state)
+        assert result == "tools"
+
+    def test_route_after_model_no_tool_calls(self):
+        """Test routing when LLM makes no tool calls."""
+        from app.agents.nodes.react_nodes import route_after_model
+        from langchain_core.messages import AIMessage
+
+        mock_msg = Mock(spec=AIMessage)
+        mock_msg.tool_calls = []
+
+        state = {
+            "messages": [mock_msg],
+            "iteration_count": 1,
+            "max_iterations": 10,
+        }
+
+        result = route_after_model(state)
+        assert result == "final"
+
+    def test_route_after_extract_interrupt(self):
+        """Test routing when interrupt is requested."""
+        from app.agents.nodes.react_nodes import route_after_extract
+
+        state = {
+            "interrupted": True,
+            "interrupt_data": {"question": "Need file path"},
+            "messages": [],
+        }
+
+        result = route_after_extract(state)
+        assert result == "interrupt"
+
+    def test_route_after_extract_continue(self):
+        """Test routing continues loop when more tools needed."""
+        from app.agents.nodes.react_nodes import route_after_extract
+        from langchain_core.messages import AIMessage
+
+        mock_msg = Mock(spec=AIMessage)
+        mock_msg.tool_calls = [{"name": "test_tool"}]
+
+        state = {
+            "interrupted": False,
+            "messages": [Mock(), mock_msg],
+            "iteration_count": 1,
+            "max_iterations": 10,
+        }
+
+        result = route_after_extract(state)
+        assert result == "model"
+
+
+class TestModelsInit:
+    """Test models __init__ exports"""
+
+    def test_models_init_exports_new_states(self):
+        """Verify models __init__ exports PlanExecuteState."""
+        from app.models import PlanExecuteState, PlanStep, DetectionAgentState, ReactAgentState
+
+        assert PlanExecuteState is not None
+        assert PlanStep is not None
+        assert DetectionAgentState is not None
+        assert ReactAgentState is not None
 
 
 if __name__ == "__main__":

@@ -24,14 +24,6 @@ DEFAULT_MODEL_CONFIGS: Dict[ModelType, Dict[str, Any]] = {
         "model_name": "deepseek-chat",
         "base_url": "https://api.deepseek.com",
     },
-    ModelType.OPENAI: {
-        "model_name": "gpt-4o-mini",
-        "base_url": None,
-    },
-    ModelType.ANTHROPIC: {
-        "model_name": "claude-3-5-sonnet-20241022",
-        "base_url": None,
-    },
 }
 
 
@@ -53,7 +45,7 @@ def create_model(
     Returns:
         Configured LLM model instance
     """
-    logger.info(f"Creating model: {model_type.value}")
+    logger.info(f"Creating model: {model_type.value if hasattr(model_type, 'value') else model_type}")
 
     # Get default config for the model type
     default_config = DEFAULT_MODEL_CONFIGS.get(model_type, {})
@@ -78,14 +70,8 @@ def create_model(
     # Create the appropriate model instance
     if model_type == ModelType.DEEPSEEK:
         return DeepSeekModel(config)
-    # elif model_type == ModelType.OPENAI:
-    #     from app.models.openai import OpenAIModel
-    #     return OpenAIModel(config)
-    # elif model_type == ModelType.ANTHROPIC:
-    #     from app.models.anthropic import AnthropicModel
-    #     return AnthropicModel(config)
-    else:
-        raise ValueError(f"Unsupported model type: {model_type}")
+
+    raise ValueError(f"Unsupported model type: {model_type}")
 
 
 def create_deepseek_model(

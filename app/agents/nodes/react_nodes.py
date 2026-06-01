@@ -15,15 +15,12 @@ Routing:
 """
 
 import json
-import uuid
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Callable
 from langchain_core.messages import AIMessage, ToolMessage, HumanMessage, SystemMessage
 from langgraph.graph import END
 
-from app.models.react_agent_state import ReactAgentState
 from app.utils.logger import get_logger
-from app.utils.prompt_loader import load_prompt
-from app.utils.llm_logger import log_llm_conversation
+from app.utils.llm_logger import get_trace_logger
 
 logger = get_logger(__name__)
 
@@ -69,39 +66,48 @@ def compress_messages(messages: List, max_length: int = 2000) -> List:
 
 # ==================== Node Factory Functions ====================
 
-def create_model_node(llm, system_prompt: str) -> Callable:
+def create_model_node(llm, system_prompt: str, first_iteration_instruction: str = None) -> Callable:
     """Create a model node that invokes the LLM with bound tools.
 
     Args:
         llm: LLM instance with tools bound via bind_tools()
         system_prompt: System prompt to guide the LLM
+        first_iteration_instruction: Optional instruction appended on the first iteration.
+            If None, no extra instruction is added (supervisor decides autonomously).
 
     Returns:
         Node function for StateGraph
     """
-    def model_node(state: ReactAgentState) -> ReactAgentState:
+    def model_node(state: Dict) -> Dict:
         """Invoke LLM to decide next action (tool call or final response)."""
         iteration = state.get("iteration_count", 0) + 1
         state["iteration_count"] = iteration
 
         # Prepare messages with system prompt
         messages = list(state.get("messages", []))
+        # Track only NEW messages to return as delta (avoids add_messages duplication)
+        new_messages = []
 
         # If messages is empty but we have task_description, create initial HumanMessage
         if not messages:
-            task_description = state.get("task_description", "")
+            task_description = state.get("task_description", "") or state.get("user_input", "")
             if task_description:
-                messages = [HumanMessage(content=task_description)]
+                human_msg = HumanMessage(content=task_description)
+                messages = [human_msg]
+                new_messages.append(human_msg)
                 logger.info(f"REACT: Initial task: {task_description[:100]}...")
 
         # Add system prompt as first message if not present
         if not messages or not isinstance(messages[0], SystemMessage):
-            messages = [SystemMessage(content=system_prompt)] + messages
+            sys_msg = SystemMessage(content=system_prompt)
+            messages = [sys_msg] + messages
+            new_messages.insert(0, sys_msg)
 
-        # For first iteration, add explicit instruction to call tools
-        if iteration == 1:
-            instruction = HumanMessage(content="\n\n请立即调用 csv_reader_tool 开始分析数据。")
+        # For first iteration, add explicit instruction if provided
+        if iteration == 1 and first_iteration_instruction:
+            instruction = HumanMessage(content=first_iteration_instruction)
             messages = messages + [instruction]
+            new_messages.append(instruction)
 
         # Compress long messages
         messages = compress_messages(messages)
@@ -119,7 +125,9 @@ def create_model_node(llm, system_prompt: str) -> Callable:
                 logger.warning(f"REACT: LLM returned unexpected type: {type(response)}")
                 response = AIMessage(content=str(response))
 
-            state["messages"] = messages + [response]
+            # Return only NEW messages (delta) to avoid add_messages duplication.
+            # add_messages reducer will append these to existing state messages.
+            state["messages"] = new_messages + [response]
 
             # Log for debugging
             if hasattr(response, 'tool_calls') and response.tool_calls:
@@ -128,29 +136,29 @@ def create_model_node(llm, system_prompt: str) -> Callable:
             else:
                 logger.info("REACT: LLM did not request tools (proceeding to final)")
 
-            log_llm_conversation(
-                agent_name="react_model",
-                iteration=iteration,
+            # Trace LLM call
+            get_trace_logger().log_llm_call(
+                agent="react_model",
                 input_messages=messages,
                 response=response,
                 metadata={
+                    "iteration": iteration,
                     "has_tool_calls": bool(hasattr(response, 'tool_calls') and response.tool_calls),
-                    "tool_count": len(response.tool_calls) if hasattr(response, 'tool_calls') else 0
-                }
+                },
             )
 
         except Exception as e:
             logger.error(f"REACT: LLM invocation failed: {e}")
             # Add error message and continue
             error_msg = AIMessage(content=f"LLM 调用失败: {str(e)}")
-            state["messages"] = messages + [error_msg]
+            state["messages"] = new_messages + [error_msg]
 
         return state
 
     return model_node
 
 
-def extract_results_node(state: ReactAgentState) -> ReactAgentState:
+def extract_results_node(state: Dict) -> Dict:
     """Extract results from ToolMessages and update state.
 
     This node:
@@ -270,173 +278,10 @@ def extract_results_node(state: ReactAgentState) -> ReactAgentState:
                 "iteration": state.get("iteration_count", 0)
             })
 
-    return state
-
-
-def create_final_response_node(refine_prompt_path: str = "app/prompts/diagnose_refine.md",
-                                llm=None) -> Callable:
-    """Create a final response node that synthesizes all results.
-
-    Args:
-        refine_prompt_path: Path to the refine prompt template
-        llm: LLM instance for final synthesis (uses default if None)
-
-    Returns:
-        Node function for StateGraph
-    """
-    def final_response_node(state: ReactAgentState) -> ReactAgentState:
-        """Generate final response from all tool results."""
-        logger.info("REACT: Generating final response")
-
-        # Build result summary
-        parts = []
-
-        task_description = state.get("task_description", "")
-        if task_description:
-            parts.append(f"## 任务描述\n{task_description}")
-
-        # Add analysis parameters
-        inject_time = state.get("inject_time")
-        abnormal_kpi = state.get("abnormal_kpi")
-        if inject_time or abnormal_kpi:
-            parts.append("\n## 分析参数")
-            if inject_time:
-                from datetime import datetime, timezone, timedelta
-                tz = timezone(timedelta(hours=8))
-                dt_str = datetime.fromtimestamp(inject_time, tz=tz).strftime("%Y-%m-%d %H:%M:%S")
-                parts.append(f"- 故障注入时间: {dt_str} (Unix: {inject_time})")
-            if abnormal_kpi:
-                parts.append(f"- 异常指标: {abnormal_kpi}")
-
-        # Add CSV info
-        csv_path = state.get("csv_file_path")
-        csv_headers = state.get("csv_headers")
-        if csv_path and csv_headers:
-            parts.append(f"\n## CSV 数据\n- 文件: {csv_path}\n- 列数: {len(csv_headers)}")
-
-        # Add 3-sigma results
-        three_sigma_result = state.get("three_sigma_result")
-        if three_sigma_result:
-            parts.append("\n## 3-Sigma 异常检测结果")
-            if three_sigma_result.get("success"):
-                anomalies = three_sigma_result.get("anomalies", [])
-                params = three_sigma_result.get("parameters", {})
-                parts.append(f"- 状态: 成功")
-                parts.append(f"- 基线/检测窗口: {params.get('baseline_minutes', '?')}min / {params.get('detect_minutes', '?')}min")
-                parts.append(f"- 阈值: {params.get('threshold', '?')}σ")
-                parts.append(f"- 扫描指标数: {three_sigma_result.get('metrics_checked', '?')}")
-                parts.append(f"- 异常指标数: {len(anomalies)}")
-                if anomalies:
-                    parts.append(f"- 异常指标 (按z-score降序):")
-                    for a in anomalies[:15]:
-                        parts.append(f"  - {a['metric']}: z={a['z_score']:.2f}, value={a['value']:.4f}, baseline μ={a['baseline_mean']:.4f}±{a['baseline_std']:.4f}")
-            else:
-                parts.append(f"- 状态: 失败\n- 错误: {three_sigma_result.get('error', 'Unknown')}")
-
-        # Add RCD results
-        rcd_result = state.get("rcd_result")
-        if rcd_result:
-            parts.append("\n## IAF-RCL 算法结果")
-            if rcd_result.get("success"):
-                rc = rcd_result.get("root_causes", [])
-                parts.append(f"- 状态: 成功\n- 根因数量: {len(rc)}")
-                if rc:
-                    parts.append(f"- 根因列表 (前20): {rc[:20]}")
-            else:
-                parts.append(f"- 状态: 失败\n- 错误: {rcd_result.get('error', 'Unknown')}")
-
-        # Add PC results
-        pc_result = state.get("pc_result")
-        if pc_result:
-            parts.append("\n## KE-FPC 算法结果")
-            if pc_result.get("success"):
-                rc = pc_result.get("root_causes", [])
-                edges = pc_result.get("edges", [])
-                parts.append(f"- 状态: 成功\n- 根因数量: {len(rc)}\n- 因果边: {len(edges)}")
-                if rc:
-                    parts.append(f"- 根因列表 (前20): {rc[:20]}")
-                if edges:
-                    parts.append(f"- 因果边 (前30): {edges[:30]}")
-            else:
-                parts.append(f"- 状态: 失败\n- 错误: {pc_result.get('error', 'Unknown')}")
-
-        # Add graph visualizations
-        graph_visualizations = state.get("graph_visualizations", [])
-        if graph_visualizations:
-            parts.append("\n## 故障传播图可视化")
-            for viz in graph_visualizations:
-                filepath = viz.get("filepath")
-                fmt = viz.get("format", "html")
-                parts.append(f"- {fmt.upper()} 格式图: {filepath}")
-                if viz.get("abnormal_kpi"):
-                    parts.append(f"  异常指标: {viz['abnormal_kpi']}")
-
-        # Add tool errors
-        tool_errors = state.get("tool_errors", [])
-        if tool_errors:
-            parts.append("\n## 执行错误")
-            for err in tool_errors:
-                parts.append(f"- {err.get('tool', 'unknown')}: {err.get('error', 'unknown')}")
-
-        result_str = "\n".join(parts)
-
-        # Load refine prompt
-        try:
-            refine_prompt = load_prompt(refine_prompt_path)
-            prompt = refine_prompt.replace("{{RESULT_STR}}", result_str)
-        except Exception:
-            if rcd_result or pc_result:
-                prompt = f"你是一个 AIOps 根因分析专家。基于以下分析结果生成报告：\n\n{result_str}\n\n请生成包含根因指标列表、故障传播路径、故障类型判断、结论与建议的结构化报告。"
-            else:
-                prompt = f"未能成功执行任何根因分析算法。\n\n任务: {task_description}\n\n请说明问题并给出建议。"
-
-        # Generate final response with LLM
-        if llm is None:
-            from app.config.model_config import get_deepseek_llm
-            llm_instance = get_deepseek_llm(temperature=0.3)
-        else:
-            llm_instance = llm
-
-        try:
-            final_result = llm_instance.invoke(prompt)
-            final_content = final_result if isinstance(final_result, str) else str(final_result)
-
-            log_llm_conversation(
-                agent_name="react_final",
-                iteration=1,
-                input_messages=[HumanMessage(content=prompt)],
-                response=AIMessage(content=final_content),
-                metadata={
-                    "rcd_executed": bool(rcd_result),
-                    "pc_executed": bool(pc_result),
-                    "tool_errors_count": len(tool_errors),
-                    "type": "final_refinement"
-                }
-            )
-
-            state["final_response"] = final_content
-            state["integrated_result"] = final_content  # Legacy compatibility
-
-        except Exception as e:
-            logger.error(f"REACT: Final LLM call failed: {e}")
-            state["final_response"] = result_str + "\n\n注: LLM报告生成失败，以上为原始执行结果。"
-            state["integrated_result"] = state["final_response"]
-
-        graph_viz = None
-        graph_visualizations = state.get("graph_visualizations") or []
-        if graph_visualizations:
-            graph_viz = graph_visualizations[-1]
-
-        from app.utils.topology_chat import build_final_report_message
-
-        state["messages"] = state.get("messages", []) + [
-            build_final_report_message(state["final_response"], graph_viz)
-        ]
-
-        logger.info("REACT: Final response generated")
-        return state
-
-    return final_response_node
+    # Return only modified fields, NOT messages.
+    # This prevents the add_messages reducer from re-adding existing messages.
+    result = {k: v for k, v in state.items() if k != "messages"}
+    return result
 
 
 # ==================== Routing Functions ====================

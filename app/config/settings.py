@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     # LangGraph
     LANGGRAPH_DEBUG: bool = os.getenv("LANGGRAPH_DEBUG", "true").lower() == "true"
     LANGGRAPH_PUBLIC_BASE_URL: str = os.getenv(
-        "LANGGRAPH_PUBLIC_BASE_URL", "http://127.0.0.1:2024"
+        "LANGGRAPH_PUBLIC_BASE_URL", "http://192.168.199.5:32024"
     )
     GRAPH_OUTPUT_DIR: str = os.getenv("GRAPH_OUTPUT_DIR", "outputs/graphs")
 
@@ -51,6 +51,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "ignore"
 
 
 settings = Settings()

@@ -42,7 +42,7 @@ tools:
 
   three_sigma_tool:
     name: three_sigma_tool
-    description: 使用3-sigma算法检测故障前后指标的异常程度，基于注入前基线窗口的均值和标准差，识别故障后超过阈值的异常指标
+    description: 使用3-sigma算法检测异常指标，取故障时间前1小时到前30分钟数据建立基线(μ/σ)，在故障时间前后10分钟区间内检测异常
     module: app.tools.three_sigma
     function: run_three_sigma
     args_schema: ThreeSigmaInput

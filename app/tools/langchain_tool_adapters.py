@@ -11,16 +11,66 @@ The adapters handle:
 """
 
 import json
+import time
 import pandas as pd
 from typing import Dict, Any, List, Optional, Callable, Type
 from pydantic import BaseModel, Field
 from langchain_core.tools import StructuredTool
 
+from typing import Union
 from app.tools.tool_registry import ToolRegistry
 from app.utils.logger import get_logger
 from app.utils.path_resolver import resolve_data_path
+from app.utils.time_utils import format_unix_ts
 
 logger = get_logger(__name__)
+
+# Module-level agent name context for tool tracing
+_current_agent_name: str = "react_agent"
+
+
+def set_agent_name(name: str) -> None:
+    """Set the current agent name for tool call tracing attribution."""
+    global _current_agent_name
+    _current_agent_name = name
+
+
+def get_agent_name() -> str:
+    """Get the current agent name."""
+    return _current_agent_name
+
+
+# ==================== Time Conversion ====================
+
+def _convert_inject_time(inject_time: Union[float, int, str]) -> float:
+    """Convert inject_time to naive Beijing Unix timestamp.
+
+    Naive Beijing timestamps treat Beijing time as UTC (no +8h offset).
+    "2026-01-05 05:48:00" → seconds from epoch to 2026-01-05 05:48:00 (as UTC).
+
+    Accepts:
+    - float/int: used directly (assumed already in the correct convention)
+    - str: human-readable datetime string (Beijing time), parsed as naive UTC
+
+    Returns:
+        Naive Beijing Unix timestamp as float
+    """
+    if isinstance(inject_time, (int, float)):
+        return float(inject_time)
+
+    if isinstance(inject_time, str):
+        try:
+            ts = pd.to_datetime(inject_time)
+            # Naive: treat Beijing time as UTC — no timezone offset
+            epoch = pd.Timestamp("1970-01-01")
+            return float((ts - epoch) / pd.Timedelta(1, "s"))
+        except Exception as e:
+            raise ValueError(
+                f"无法解析 inject_time '{inject_time}': {e}。"
+                f"请使用格式如 '2026-01-05 05:48:00'"
+            )
+
+    return float(inject_time)
 
 
 # ==================== CSV Data Cache ====================
@@ -64,14 +114,18 @@ def _wrap_csv_reader(func: Callable) -> Callable:
                 logger.warning(f"Removing {len(dup_cols)} duplicate column(s)")
                 df = df.loc[:, ~df.columns.duplicated()]
 
-            # Normalize time column
+            # Normalize time column — naive Beijing timestamps (treat Beijing time as UTC)
             if 'time' in df.columns:
                 if not pd.api.types.is_numeric_dtype(df['time']):
                     try:
                         time_series = pd.to_datetime(df['time'])
-                        time_ns = time_series.astype('datetime64[ns]').astype('int64')
-                        df['time'] = time_ns // 10**9
-                        logger.info("Time column converted to Unix timestamp")
+                        # Naive: treat Beijing time as UTC, no timezone localization
+                        epoch = pd.Timestamp("1970-01-01")
+                        df['time'] = (time_series - epoch) / pd.Timedelta(1, "s")
+                        logger.info(
+                            f"Time column converted to naive Beijing timestamp: "
+                            f"{format_unix_ts(df['time'].min())} ~ {format_unix_ts(df['time'].max())}"
+                        )
                     except Exception as e:
                         logger.warning(f"Could not convert time column: {e}")
 
@@ -84,7 +138,7 @@ def _wrap_csv_reader(func: Callable) -> Callable:
                 "shape": [df.shape[0], df.shape[1]],
                 "columns": df.columns.tolist(),
                 "metric_columns": df.select_dtypes(include=['number']).columns.tolist(),
-                "time_range": f"{df['time'].min()} — {df['time'].max()}" if "time" in df.columns else "N/A",
+                "time_range": f"{format_unix_ts(df['time'].min())} ~ {format_unix_ts(df['time'].max())}" if "time" in df.columns else "N/A",
             }
             return json.dumps(result, ensure_ascii=False)
 
@@ -97,9 +151,11 @@ def _wrap_csv_reader(func: Callable) -> Callable:
 
 def _wrap_three_sigma(func: Callable) -> Callable:
     """Wrap three_sigma tool to use cached CSV data."""
-    def wrapper(inject_time: float, baseline_minutes: int = 5, detect_minutes: int = 5,
+    def wrapper(inject_time: Union[float, str],
+                baseline_start_minutes: int = 30, baseline_end_minutes: int = 60,
+                detect_before_minutes: int = 10, detect_minutes: int = 10,
                 threshold: float = 3.0, metric_columns: Optional[List[str]] = None, **kwargs) -> str:
-        logger.info(f"TOOL: three_sigma_tool called with inject_time={inject_time}, threshold={threshold}")
+        logger.info(f"TOOL: three_sigma_tool called with inject_time={inject_time} (type={type(inject_time).__name__})")
 
         if not _csv_data_cache:
             return json.dumps({
@@ -111,10 +167,13 @@ def _wrap_three_sigma(func: Callable) -> Callable:
         df = list(_csv_data_cache.values())[0]
 
         try:
+            inject_time_ts = _convert_inject_time(inject_time)
             result = func(
                 data=df,
-                inject_time=inject_time,
-                baseline_minutes=baseline_minutes,
+                inject_time=inject_time_ts,
+                baseline_start_minutes=baseline_start_minutes,
+                baseline_end_minutes=baseline_end_minutes,
+                detect_before_minutes=detect_before_minutes,
                 detect_minutes=detect_minutes,
                 threshold=threshold,
                 metric_columns=metric_columns,
@@ -136,8 +195,8 @@ def _wrap_three_sigma(func: Callable) -> Callable:
 
 def _wrap_rcd_tool(func: Callable) -> Callable:
     """Wrap RCD tool to use cached CSV data."""
-    def wrapper(inject_time: float, gamma: int = 5, abnormal_kpi: Optional[str] = None, **kwargs) -> str:
-        logger.info(f"TOOL: rcd_tool called with inject_time={inject_time}, gamma={gamma}")
+    def wrapper(inject_time: Union[float, str], gamma: int = 5, abnormal_kpi: Optional[str] = None, **kwargs) -> str:
+        logger.info(f"TOOL: rcd_tool called with inject_time={inject_time} (type={type(inject_time).__name__})")
 
         # Get cached CSV data
         if not _csv_data_cache:
@@ -150,9 +209,10 @@ def _wrap_rcd_tool(func: Callable) -> Callable:
         df = list(_csv_data_cache.values())[0]  # Get first (and should be only) cached dataset
 
         try:
+            inject_time_ts = _convert_inject_time(inject_time)
             result = func(
                 data=df,
-                inject_time=inject_time,
+                inject_time=inject_time_ts,
                 gamma=gamma,
                 localized=True,
                 bins=5,
@@ -211,6 +271,77 @@ def _wrap_pc_tool(func: Callable) -> Callable:
     return wrapper
 
 
+def _wrap_graph_visualization(func: Callable) -> Callable:
+    """Wrap graph visualization tool to return JSON string.
+
+    Strips large html_content to keep ToolMessage compact while
+    preserving png_base64 for inline Studio display.
+    """
+    def wrapper(**kwargs) -> str:
+        try:
+            result = func(**kwargs)
+            if isinstance(result, dict):
+                # Strip large fields not needed in ToolMessage;
+                # png_base64 is kept for inline Studio display.
+                _strip = {"html_content", "base64_content"}
+                light = {k: v for k, v in result.items()
+                         if k not in _strip}
+                return json.dumps(light, ensure_ascii=False, default=str)
+            return json.dumps({"success": False, "error": "unexpected return type"},
+                              ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Graph visualization tool failed: {e}")
+            return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+    return wrapper
+
+
+# ==================== Tool Trace Wrapper ====================
+
+def _trace_tool_wrapper(tool_name: str, func: Callable) -> Callable:
+    """Wrap a tool function to trace its execution via TraceLogger.
+
+    Records start time, logs args, calls the original function,
+    logs result, and records duration.
+    """
+    from app.utils.llm_logger import get_trace_logger
+
+    def wrapper(**kwargs):
+        agent = get_agent_name()
+        start = time.monotonic()
+        error = None
+        result = None
+        try:
+            result = func(**kwargs)
+            return result
+        except Exception as e:
+            error = str(e)
+            raise
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            try:
+                trace = get_trace_logger()
+                # Serialize args — convert non-serializable to str
+                safe_args = {}
+                for k, v in kwargs.items():
+                    try:
+                        json.dumps(v, default=str)
+                        safe_args[k] = v
+                    except (TypeError, ValueError):
+                        safe_args[k] = str(v)
+                trace.log_tool_call(
+                    agent=agent,
+                    tool_name=tool_name,
+                    args=safe_args,
+                    result=result if result is not None else "",
+                    duration_ms=duration_ms,
+                    error=error,
+                )
+            except Exception as trace_err:
+                logger.warning(f"Trace logging failed for {tool_name}: {trace_err}")
+
+    return wrapper
+
+
 # ==================== Pydantic Schema Factory ====================
 
 def create_pydantic_schema(tool_config: Dict[str, Any]) -> Type[BaseModel]:
@@ -265,7 +396,10 @@ class CsvReaderInput(BaseModel):
 
 class RcdToolInput(BaseModel):
     """Input schema for rcd_tool"""
-    inject_time: float = Field(..., description="Fault injection time as Unix timestamp (seconds) or datetime string like '2026-01-05 05:48:00'")
+    inject_time: Union[float, str] = Field(
+        ...,
+        description="故障注入时间。支持 datetime 字符串（如 '2026-01-05 05:48:00'）或 Unix 时间戳（秒）。推荐直接传入字符串，无需手动计算时间戳。"
+    )
     gamma: int = Field(default=5, description="Gamma parameter for IAF-RCL algorithm (default: 5)")
     abnormal_kpi: Optional[str] = Field(default=None, description="Name of the abnormal KPI metric (optional)")
 
@@ -278,9 +412,14 @@ class PcToolInput(BaseModel):
 
 class ThreeSigmaInput(BaseModel):
     """Input schema for three_sigma_tool"""
-    inject_time: float = Field(..., description="Fault injection time as Unix timestamp (seconds)")
-    baseline_minutes: int = Field(default=5, description="Minutes before inject_time for baseline μ/σ calculation (default: 5)")
-    detect_minutes: int = Field(default=5, description="Minutes after inject_time to scan for anomalies (default: 5)")
+    inject_time: Union[float, str] = Field(
+        ...,
+        description="故障注入时间。支持 datetime 字符串（如 '2026-01-05 05:48:00'）或 Unix 时间戳（秒）。推荐直接传入字符串，无需手动计算时间戳。"
+    )
+    baseline_start_minutes: int = Field(default=30, description="基线窗口起始偏移（分钟），基线窗口为 [inject_time - baseline_end, inject_time - baseline_start)（默认 30）")
+    baseline_end_minutes: int = Field(default=60, description="基线窗口结束偏移（分钟），基线窗口为 [inject_time - baseline_end, inject_time - baseline_start)（默认 60）")
+    detect_before_minutes: int = Field(default=10, description="检测窗口前展长度（分钟），故障注入时间前 N 分钟纳入检测（默认 10）")
+    detect_minutes: int = Field(default=10, description="检测窗口后延长度（分钟），故障注入时间后 N 分钟纳入检测（默认 10）")
     threshold: float = Field(default=3.0, description="Number of standard deviations for anomaly threshold (default: 3.0)")
     metric_columns: Optional[List[str]] = Field(default=None, description="Specific metric columns to check; if None, all numeric columns except 'time'")
 
@@ -344,8 +483,7 @@ def create_langchain_tools(
             wrapped_func = _wrap_pc_tool(tool_func)
             args_schema = PcToolInput
         elif tool_name == "graph_visualization_tool":
-            # Direct wrapper for graph visualization (returns JSON)
-            wrapped_func = tool_func
+            wrapped_func = _wrap_graph_visualization(tool_func)
             args_schema = GraphVisualizationToolInput
         else:
             # Generic wrapper for other tools
@@ -360,6 +498,9 @@ def create_langchain_tools(
 
             wrapped_func = generic_wrapper
             args_schema = create_pydantic_schema(tool_config) if tool_config else None
+
+        # Wrap with trace logging
+        wrapped_func = _trace_tool_wrapper(tool_name, wrapped_func)
 
         tool = StructuredTool.from_function(
             func=wrapped_func,
@@ -382,5 +523,5 @@ def create_diagnose_tools(tool_registry: Optional[ToolRegistry] = None) -> List[
     Returns:
         List of LangChain StructuredTool instances for diagnose agent
     """
-    tool_names = ["csv_reader_tool", "three_sigma_tool", "rcd_tool", "pc_tool", "graph_visualization_tool", "ask_user"]
+    tool_names = ["csv_reader_tool", "rcd_tool", "pc_tool", "graph_visualization_tool"]
     return create_langchain_tools(tool_names, tool_registry)

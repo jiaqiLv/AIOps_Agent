@@ -1,8 +1,15 @@
-"""Time utilities for time window parsing"""
+"""Time utilities for time window parsing
+
+Convention: all Unix timestamps in this system are "naive Beijing timestamps" —
+the number of seconds from 1970-01-01 00:00:00 UTC to the Beijing-time moment,
+treating Beijing time as if it were UTC (no +8h offset).
+
+Display: convert back via UTC to recover the original Beijing time string.
+"""
 
 import re
-from datetime import datetime
-from typing import Optional, Dict, Any
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any, Union
 
 
 def parse_time_range(time_str: str) -> Optional[Dict[str, str]]:
@@ -64,3 +71,31 @@ def parse_timestamp(ts_str: str) -> Optional[datetime]:
             continue
 
     return None
+
+
+def format_unix_ts(ts: Union[float, int, None]) -> str:
+    """Format a naive Beijing Unix timestamp as Beijing time string.
+
+    Naive Beijing timestamps treat the Beijing time moment as UTC,
+    so converting back via UTC recovers the original Beijing time string.
+
+    Returns:
+        "YYYY-MM-DD HH:MM:SS" in Beijing time, or "N/A" if ts is None.
+    """
+    if ts is None:
+        return "N/A"
+    try:
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except (OSError, ValueError, OverflowError):
+        return str(ts)
+
+
+def format_inject_time(ts: Union[float, int, None]) -> str:
+    """Format inject_time with both human-readable time and Unix timestamp.
+
+    Convenience wrapper around format_unix_ts that appends the raw Unix value.
+    """
+    if ts is None:
+        return "未提供"
+    dt_str = format_unix_ts(ts)
+    return f"{dt_str} (Unix: {ts})"

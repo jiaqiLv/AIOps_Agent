@@ -1,22 +1,23 @@
-"""Agents module - Multi-agent system with nested subgraphs
+"""Agents module - Three-agent architecture with Report Agent
 
 Exports:
-- main_graph: The main entry point graph with nested subgraphs
-- supervisor_agent: Supervisor subgraph (can be used independently)
-- AgentFactory: Factory for building agents from configuration
-- get_agent_factory: Get the global agent factory instance
-
-Note: The diagnose agent is now built dynamically using AgentFactory.
-Use get_agent_factory().build_agent("diagnose") to get the diagnose subgraph.
+- main_graph: The main entry point graph (START → supervisor → END)
+- supervisor_agent: Plan-Execute supervisor (planner → executor → reporter)
+- detection_agent: Detection subgraph for 3-Sigma anomaly detection
+- diagnose_agent: Diagnose subgraph for root cause analysis (structured results)
+- report_agent: Report agent for NL report generation from structured data
 """
 
 from app.agents.main_graph import main_graph
-from app.agents.supervisor_agent import supervisor_agent
-from app.agents.agent_factory import AgentFactory, get_agent_factory
+from app.agents.supervisor_plan_execute import plan_execute_agent as supervisor_agent
+from app.agents.detection_agent import detection_agent
+from app.agents.diagnose_agent import diagnose_agent
+from app.agents.report_agent import report_agent
 
 __all__ = [
     "main_graph",
     "supervisor_agent",
-    "AgentFactory",
-    "get_agent_factory"
+    "detection_agent",
+    "diagnose_agent",
+    "report_agent",
 ]

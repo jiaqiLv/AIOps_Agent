@@ -6,6 +6,7 @@ import numpy as np
 
 from app.config.algorithm_names import ALGORITHM_IAF_RCL
 from app.utils.logger import get_logger
+from app.utils.time_utils import format_unix_ts
 
 logger = get_logger(__name__)
 
@@ -92,29 +93,29 @@ def run_rcd_analysis(
         # Log time information for debugging
         time_min = data["time"].min()
         time_max = data["time"].max()
-        logger.info(f"Data time range: {time_min} to {time_max}")
+        logger.info(f"Data time range: {format_unix_ts(time_min)} ~ {format_unix_ts(time_max)} (Unix: {time_min} ~ {time_max})")
 
         # Check if inject_time is within data range
         if inject_time < time_min:
-            logger.warning(f"inject_time ({inject_time}) is BEFORE data start ({time_min})")
+            logger.warning(f"inject_time ({format_unix_ts(inject_time)}) is BEFORE data start ({format_unix_ts(time_min)})")
             return {
                 "root_causes": [],
                 "status": "error",
-                "message": f"inject_time ({inject_time}) is before data time range ({time_min} to {time_max}). Please provide a time within the data range."
+                "message": f"inject_time ({format_unix_ts(inject_time)}) 在数据时间范围 ({format_unix_ts(time_min)} ~ {format_unix_ts(time_max)}) 之前。请提供数据范围内的故障注入时间。"
             }
         elif inject_time > time_max:
-            logger.warning(f"inject_time ({inject_time}) is AFTER data end ({time_max})")
+            logger.warning(f"inject_time ({format_unix_ts(inject_time)}) is AFTER data end ({format_unix_ts(time_max)})")
             return {
                 "root_causes": [],
                 "status": "error",
-                "message": f"inject_time ({inject_time}) is after data time range ({time_min} to {time_max}). Please provide a time within the data range."
+                "message": f"inject_time ({format_unix_ts(inject_time)}) 在数据时间范围 ({format_unix_ts(time_min)} ~ {format_unix_ts(time_max)}) 之后。请提供数据范围内的故障注入时间。"
             }
 
         # Count rows before and after inject_time
         normal_count = (data["time"] < inject_time).sum()
         anomalous_count = (data["time"] >= inject_time).sum()
         logger.info(f"Data split: normal={normal_count} rows, anomalous={anomalous_count} rows")
-        logger.info(f"inject_time={inject_time}, data time range: {time_min} to {time_max}")
+        logger.info(f"inject_time={format_unix_ts(inject_time)}, data time range: {format_unix_ts(time_min)} ~ {format_unix_ts(time_max)}")
 
         # Quick check for data size - if too large, RCD will take too long
         total_rows = len(data)
@@ -127,17 +128,17 @@ def run_rcd_analysis(
             return {
                 "root_causes": [],
                 "status": "error",
-                "message": f"No normal data found. All data points have time >= inject_time ({inject_time})."
+                "message": f"No normal data found. All data points have time >= inject_time ({format_unix_ts(inject_time)})."
             }
         if anomalous_count == 0:
             return {
                 "root_causes": [],
                 "status": "error",
-                "message": f"No anomalous data found. All data points have time < inject_time ({inject_time})."
+                "message": f"No anomalous data found. All data points have time < inject_time ({format_unix_ts(inject_time)})."
             }
 
         # Call RCD algorithm
-        logger.info(f"Calling RCD algorithm with data shape: {data.shape}, inject_time: {inject_time}, gamma: {gamma}, dataset={dataset}")
+        logger.info(f"Calling RCD algorithm with data shape: {data.shape}, inject_time: {format_unix_ts(inject_time)}, gamma: {gamma}, dataset={dataset}")
 
         # Call RCD algorithm directly without stdout capture
         logger.info("[RCD_WRAPPER] Calling RCD algorithm (this may take several minutes for large datasets)...")

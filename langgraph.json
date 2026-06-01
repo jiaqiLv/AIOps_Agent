@@ -5,8 +5,9 @@
   },
   "graphs": {
     "main": "./app/agents/main_graph.py:main_graph",
-    "supervisor": "./app/agents/supervisor_agent.py:supervisor_agent",
-    "diagnose": "./app/agents/diagnose_agent.py:diagnose_agent"
+    "supervisor": "./app/agents/supervisor_plan_execute.py:build_plan_execute_agent",
+    "detection": "./app/agents/detection_agent.py:build_detection_agent",
+    "diagnose": "./app/agents/diagnose_agent.py:build_diagnose_agent"
   },
   "env": ".env"
 }

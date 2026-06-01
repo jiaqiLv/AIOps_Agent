@@ -1,22 +1,30 @@
 agents:
   supervisor:
     name: supervisor
-    type: supervisor_agent
-    workflow: react_tool_loop
-    state_schema: app.models.supervisor_state.SupervisorState
-    system_prompt: app/prompts/supervisor_system.md
-    tools:
-      - diagnose_subagent
-      - ask_user
+    type: plan_execute
+    workflow: plan_execute
+    state_schema: app.models.plan_execute_state.PlanExecuteState
+    system_prompt: app/prompts/supervisor_planner.md
     model:
       provider: deepseek
       name: deepseek-chat
       temperature: 0
-    max_iterations: 8
-    human_in_the_loop:
-      enabled: true
-      interrupt_on:
-        - missing_required_tool_arguments
+
+  detection:
+    name: detection
+    type: react_agent
+    workflow: react_tool_loop
+    state_schema: app.models.detection_agent_state.DetectionAgentState
+    system_prompt: app/prompts/detection_system.md
+    first_iteration_instruction: "请从任务描述中提取故障日期和时间，构造 data_path 和 inject_time，然后调用 csv_reader_tool 加载指标数据。"
+    tools:
+      - csv_reader_tool
+      - three_sigma_tool
+    model:
+      provider: deepseek
+      name: deepseek-chat
+      temperature: 0
+    max_iterations: 5
 
   diagnose:
     name: diagnose
@@ -24,21 +32,13 @@ agents:
     workflow: react_tool_loop
     state_schema: app.models.react_agent_state.ReactAgentState
     system_prompt: app/prompts/diagnose_system.md
-    refine_prompt: app/prompts/diagnose_refine.md
-    params_config: app/config/params.yaml
     tools:
       - csv_reader_tool
-      - three_sigma_tool
       - rcd_tool
       - pc_tool
       - graph_visualization_tool
-      - ask_user
     model:
       provider: deepseek
       name: deepseek-chat
       temperature: 0
     max_iterations: 10
-    human_in_the_loop:
-      enabled: true
-      interrupt_on:
-        - missing_required_tool_arguments

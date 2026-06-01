@@ -34,16 +34,6 @@ class PcInput(BaseModel):
     config: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
-class DiagnoseSubagentInput(BaseModel):
-    """Input schema for diagnose subagent tool"""
-    data_path: Optional[str] = Field(None, description="Direct path to CSV file")
-    benchmark: Optional[str] = Field(None, description="Dataset name")
-    instance: Optional[str] = Field(None, description="Instance name")
-    case: Optional[str] = Field(None, description="Case identifier")
-    fault_injection_time: str = Field(..., description="Fault injection time")
-    abnormal_kpi: str = Field(..., description="Abnormal KPI metric name")
-
-
 class AskUserInput(BaseModel):
     """Input schema for ask_user tool"""
     question: str = Field(..., description="Question to ask the user")

@@ -1,27 +1,12 @@
 """Model configuration for LLM calls - using DeepSeek by default"""
 
-from typing import Optional, Dict, Any
-from pydantic import BaseModel
+from typing import Optional
 
 from app.config.settings import settings
 from app.models import create_model, ModelType, BaseLLM
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-class ModelConfig(BaseModel):
-    """LLM model configuration (legacy, kept for compatibility)"""
-
-    model_name: str = "deepseek-chat"
-    temperature: float = 0.7
-    max_tokens: int = 2000
-    top_p: float = 0.9
-    frequency_penalty: float = 0.0
-    presence_penalty: float = 0.0
-
-    # For structured output
-    response_format: Optional[dict] = None
 
 
 def get_llm(
@@ -84,51 +69,19 @@ def get_deepseek_llm(**kwargs) -> BaseLLM:
     Returns:
         Configured DeepSeek LLM instance
     """
-    # Extract known kwargs to avoid duplicates
+    # Extract known kwargs to avoid duplicates with explicit params
+    api_key = kwargs.pop("api_key", settings.DEEPSEEK_API_KEY)
+    model_name = kwargs.pop("model_name", settings.DEEPSEEK_MODEL)
+    base_url = kwargs.pop("base_url", settings.DEEPSEEK_BASE_URL)
     temperature = kwargs.pop("temperature", settings.LLM_TEMPERATURE)
     max_tokens = kwargs.pop("max_tokens", settings.LLM_MAX_TOKENS)
 
     return create_model(
         model_type=ModelType.DEEPSEEK,
-        api_key=settings.DEEPSEEK_API_KEY,
-        model_name=settings.DEEPSEEK_MODEL,
-        base_url=settings.DEEPSEEK_BASE_URL,
+        api_key=api_key,
+        model_name=model_name,
+        base_url=base_url,
         temperature=temperature,
         max_tokens=max_tokens,
         **kwargs
     )
-
-
-# Default model configs (legacy, kept for compatibility)
-DEFAULT_MODEL_CONFIG = ModelConfig(
-    model_name="deepseek-chat",
-    temperature=0.7,
-    max_tokens=2000
-)
-FAST_MODEL_CONFIG = ModelConfig(
-    model_name="deepseek-chat",
-    temperature=0.3,
-    max_tokens=1000
-)
-PRECISE_MODEL_CONFIG = ModelConfig(
-    model_name="deepseek-chat",
-    temperature=0.1,
-    max_tokens=3000
-)
-
-# Default LLM instance (lazy loaded)
-_default_llm: Optional[BaseLLM] = None
-
-
-def get_default_llm() -> BaseLLM:
-    """
-    Get the default LLM instance (singleton pattern).
-
-    Returns:
-        Default LLM instance
-    """
-    global _default_llm
-    if _default_llm is None:
-        logger.info(f"Initializing default LLM: {settings.LLM_PROVIDER}")
-        _default_llm = get_llm()
-    return _default_llm

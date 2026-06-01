@@ -23,27 +23,30 @@ LATEST_GRAPH_FILENAME = "propagation_graph_latest.html"
 logger = get_logger(__name__)
 
 
+_DEFAULT_BASE = "http://192.168.199.5:32024"
+
+
 def get_topology_view_url() -> str:
     """Public URL for the latest propagation topology page."""
-    base = os.getenv("LANGGRAPH_PUBLIC_BASE_URL", "http://127.0.0.1:2024").rstrip("/")
+    base = os.getenv("LANGGRAPH_PUBLIC_BASE_URL", _DEFAULT_BASE).rstrip("/")
     return f"{base}/topology/latest"
 
 
 def get_topology_embed_url() -> str:
     """Fullscreen draggable topology (recommended for interaction)."""
-    base = os.getenv("LANGGRAPH_PUBLIC_BASE_URL", "http://127.0.0.1:2024").rstrip("/")
+    base = os.getenv("LANGGRAPH_PUBLIC_BASE_URL", _DEFAULT_BASE).rstrip("/")
     return f"{base}/topology/embed"
 
 
 def get_topology_files_url() -> str:
     """Backup URL via static file mount."""
-    base = os.getenv("LANGGRAPH_PUBLIC_BASE_URL", "http://127.0.0.1:2024").rstrip("/")
+    base = os.getenv("LANGGRAPH_PUBLIC_BASE_URL", _DEFAULT_BASE).rstrip("/")
     return f"{base}/topology/files/propagation_graph_latest.html"
 
 
 def get_topology_png_url() -> str:
     """Public URL for PNG topology (renders in LangGraph Studio chat markdown)."""
-    base = os.getenv("LANGGRAPH_PUBLIC_BASE_URL", "http://127.0.0.1:2024").rstrip("/")
+    base = os.getenv("LANGGRAPH_PUBLIC_BASE_URL", _DEFAULT_BASE).rstrip("/")
     return f"{base}/topology/latest.png"
 
 
@@ -364,6 +367,9 @@ def visualize_propagation_graph(
             result = _generate_png_visualization(
                 nodes, directed_edges, root_causes, abnormal_kpi, output_path
             )
+            # For PNG-only mode, also set png_base64 for inline display
+            if "base64_content" in result:
+                result["png_base64"] = result["base64_content"]
         else:
             result = _generate_html_visualization(
                 nodes, directed_edges, root_causes, abnormal_kpi, output_path, propagation_paths
@@ -384,6 +390,18 @@ def visualize_propagation_graph(
             **result,
         }
         payload["embed_url"] = get_topology_embed_url()
+
+        # Always try to generate PNG for inline display in Studio chat
+        if output_format != "png":
+            try:
+                png_result = _generate_png_visualization(
+                    nodes, directed_edges, root_causes, abnormal_kpi, output_path
+                )
+                if png_result and "base64_content" in png_result:
+                    payload["png_base64"] = png_result["base64_content"]
+                    logger.info("Also generated PNG for inline Studio display")
+            except Exception as e:
+                logger.debug(f"PNG generation skipped: {e}")
         return payload
 
     except Exception as e:
