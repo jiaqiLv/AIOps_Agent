@@ -49,6 +49,27 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2000"))
 
+    # ── Middleware settings ──
+    # M1: LLM retry / circuit breaker
+    LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
+    LLM_RETRY_BASE_DELAY: float = float(os.getenv("LLM_RETRY_BASE_DELAY", "1.0"))
+    LLM_CIRCUIT_BREAKER_THRESHOLD: int = int(os.getenv("LLM_CIRCUIT_BREAKER_THRESHOLD", "5"))
+    LLM_CIRCUIT_BREAKER_RESET_TIME: float = float(os.getenv("LLM_CIRCUIT_BREAKER_RESET_TIME", "60"))
+
+    # M4: Loop detection
+    LOOP_WARNING_THRESHOLD: int = int(os.getenv("LOOP_WARNING_THRESHOLD", "3"))
+    LOOP_HARD_STOP_THRESHOLD: int = int(os.getenv("LOOP_HARD_STOP_THRESHOLD", "5"))
+
+    # M5: Context summarization
+    SUMMARIZATION_TOKEN_THRESHOLD: int = int(os.getenv("SUMMARIZATION_TOKEN_THRESHOLD", "80000"))
+    SUMMARIZATION_KEEP_RECENT: int = int(os.getenv("SUMMARIZATION_KEEP_RECENT", "6"))
+
+    # M6: Token usage tracking
+    TOKEN_USAGE_ENABLED: bool = os.getenv("TOKEN_USAGE_ENABLED", "true").lower() == "true"
+
+    # M7: Session data isolation
+    SESSION_DATA_DIR: str = os.getenv("SESSION_DATA_DIR", "outputs")
+
     class Config:
         env_file = ".env"
         extra = "ignore"

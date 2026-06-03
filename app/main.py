@@ -1,6 +1,5 @@
 """Main entry point for the AIOps Agent"""
 
-import os
 import sys
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, AIMessage
@@ -8,6 +7,8 @@ from langchain_core.messages import HumanMessage, AIMessage
 from app.agents.main_graph import main_graph
 from app.utils.logger import get_logger
 from app.utils.llm_logger import reset_trace_logger
+from app.middleware.session_data import get_session_manager
+from app.middleware.token_usage import get_token_tracker
 
 logger = get_logger(__name__)
 
@@ -53,6 +54,7 @@ def run_conversation():
     # Initialize conversation state
     messages = []
     continue_conversation = True
+    session_context = {}
 
     while continue_conversation:
         try:
@@ -74,12 +76,20 @@ def run_conversation():
             # Start a fresh trace session for this request
             reset_trace_logger()
 
+            # M7: Create isolated session directory
+            get_session_manager().reset()
+            get_session_manager().create_session()
+
+            # M6: Reset token tracker for new request
+            get_token_tracker().reset()
+
             # Prepare state for main graph
             # Simplified state: only user_input is required
             initial_state = {
                 "user_input": user_input,
                 "messages": messages,
-                "continue_conversation": True
+                "continue_conversation": True,
+                "session_context": session_context,
             }
 
             # Execute workflow
@@ -88,6 +98,7 @@ def run_conversation():
 
             # Update messages from result
             messages = result.get("messages", [])
+            session_context = result.get("session_context", {})
 
             # Get and print assistant's response (last AI message)
             for msg in reversed(messages):
@@ -97,6 +108,11 @@ def run_conversation():
 
             # Check if conversation should continue
             continue_conversation = result.get("continue_conversation", False)
+
+            # M6: Print token usage summary
+            usage = get_token_tracker().summary()
+            if usage["total_calls"] > 0:
+                logger.info(f"Token usage: {usage}")
 
         except KeyboardInterrupt:
             print("\n\n对话被中断。再见！")
@@ -123,6 +139,13 @@ def run_single_request(user_request: str) -> str:
 
     # Start a fresh trace session for this request
     reset_trace_logger()
+
+    # M7: Create isolated session directory
+    get_session_manager().reset()
+    get_session_manager().create_session()
+
+    # M6: Reset token tracker
+    get_token_tracker().reset()
 
     messages = [HumanMessage(content=user_request)]
 

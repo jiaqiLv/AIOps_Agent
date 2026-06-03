@@ -12,12 +12,13 @@ Nodes:
 Routing:
 - route_after_model: Routes based on tool_calls presence and iteration count
 - route_after_extract: Routes based on interrupt status and completion
+
+Middleware (M1-M6) is integrated transparently inside create_model_node.
 """
 
 import json
 from typing import Dict, Any, List, Callable
 from langchain_core.messages import AIMessage, ToolMessage, HumanMessage, SystemMessage
-from langgraph.graph import END
 
 from app.utils.logger import get_logger
 from app.utils.llm_logger import get_trace_logger
@@ -69,15 +70,30 @@ def compress_messages(messages: List, max_length: int = 2000) -> List:
 def create_model_node(llm, system_prompt: str, first_iteration_instruction: str = None) -> Callable:
     """Create a model node that invokes the LLM with bound tools.
 
+    Integrated middleware:
+      M1  LLM retry + circuit breaker
+      M3  Dangling tool-call fix
+      M4  Loop detection
+      M5  Context summarization
+      M6  Token usage tracking
+
     Args:
         llm: LLM instance with tools bound via bind_tools()
         system_prompt: System prompt to guide the LLM
         first_iteration_instruction: Optional instruction appended on the first iteration.
-            If None, no extra instruction is added (supervisor decides autonomously).
 
     Returns:
         Node function for StateGraph
     """
+    # Lazy imports to avoid circular dependency at module level
+    from app.middleware.llm_error_handling import (
+        get_llm_retry_handler, LLMCircuitBreakerError, LLMMaxRetriesError,
+    )
+    from app.middleware.dangling_tool_call import fix_dangling_tool_calls
+    from app.middleware.loop_detection import detect_loop_from_messages
+    from app.middleware.summarization import summarize_if_needed
+    from app.middleware.token_usage import get_token_tracker
+
     def model_node(state: Dict) -> Dict:
         """Invoke LLM to decide next action (tool call or final response)."""
         iteration = state.get("iteration_count", 0) + 1
@@ -85,7 +101,6 @@ def create_model_node(llm, system_prompt: str, first_iteration_instruction: str 
 
         # Prepare messages with system prompt
         messages = list(state.get("messages", []))
-        # Track only NEW messages to return as delta (avoids add_messages duplication)
         new_messages = []
 
         # If messages is empty but we have task_description, create initial HumanMessage
@@ -109,13 +124,26 @@ def create_model_node(llm, system_prompt: str, first_iteration_instruction: str 
             messages = messages + [instruction]
             new_messages.append(instruction)
 
-        # Compress long messages
+        # ── M3: Fix dangling tool_call sequences ──
+        messages = fix_dangling_tool_calls(messages)
+
+        # ── M5: Summarize / compress if context too large ──
+        from app.config.settings import settings
+        messages = summarize_if_needed(
+            messages,
+            token_threshold=getattr(settings, "SUMMARIZATION_TOKEN_THRESHOLD", 80000),
+            keep_recent=getattr(settings, "SUMMARIZATION_KEEP_RECENT", 6),
+        )
+
+        # Also compress very long individual ToolMessages
         messages = compress_messages(messages)
 
         logger.info(f"REACT: Iteration {iteration}/{state.get('max_iterations', 10)}, invoking LLM")
 
         try:
-            response = llm.invoke(messages)
+            # ── M1: LLM retry + circuit breaker ──
+            retry_handler = get_llm_retry_handler()
+            response = retry_handler.invoke(llm, messages)
 
             # Ensure response is an AIMessage
             if isinstance(response, str):
@@ -125,8 +153,32 @@ def create_model_node(llm, system_prompt: str, first_iteration_instruction: str 
                 logger.warning(f"REACT: LLM returned unexpected type: {type(response)}")
                 response = AIMessage(content=str(response))
 
-            # Return only NEW messages (delta) to avoid add_messages duplication.
-            # add_messages reducer will append these to existing state messages.
+            # ── M6: Track token usage ──
+            if getattr(settings, "TOKEN_USAGE_ENABLED", True):
+                get_token_tracker().track("react_model", response)
+
+            # ── M4: Loop detection ──
+            all_msgs = messages + [response]
+            loop_status = detect_loop_from_messages(
+                all_msgs,
+                warning_threshold=getattr(settings, "LOOP_WARNING_THRESHOLD", 3),
+                stop_threshold=getattr(settings, "LOOP_HARD_STOP_THRESHOLD", 5),
+            )
+            if loop_status == "stop":
+                # Strip tool_calls to force routing to final
+                logger.warning("LOOP: Hard stop — stripping tool_calls")
+                response = AIMessage(
+                    content=(response.content or "") + "\n\n[系统] 检测到重复工具调用，已自动终止。"
+                )
+            elif loop_status == "warning":
+                logger.warning("LOOP: Injecting warning into response")
+                warning_suffix = "\n\n[系统警告] 检测到重复的工具调用模式，请尝试不同的参数或策略。"
+                response = AIMessage(
+                    content=(response.content or "") + warning_suffix,
+                    tool_calls=response.tool_calls,
+                )
+
+            # Return only NEW messages (delta)
             state["messages"] = new_messages + [response]
 
             # Log for debugging
@@ -147,9 +199,13 @@ def create_model_node(llm, system_prompt: str, first_iteration_instruction: str 
                 },
             )
 
+        except (LLMCircuitBreakerError, LLMMaxRetriesError) as e:
+            logger.error(f"REACT: LLM middleware error: {e}")
+            error_msg = AIMessage(content=f"LLM 服务暂时不可用: {e}")
+            state["messages"] = new_messages + [error_msg]
+
         except Exception as e:
             logger.error(f"REACT: LLM invocation failed: {e}")
-            # Add error message and continue
             error_msg = AIMessage(content=f"LLM 调用失败: {str(e)}")
             state["messages"] = new_messages + [error_msg]
 
@@ -255,11 +311,9 @@ def extract_results_node(state: Dict) -> Dict:
                     logger.info(f"REACT: Interrupt requested - question: {result.get('question')}")
 
             elif tool_name == "graph_visualization_tool":
-                state["tool_results"][tool_name] = result
                 if result.get("success"):
                     filepath = result.get("filepath")
                     logger.info(f"REACT: Graph visualization generated: {filepath}")
-                    # Store for final report
                     if not state.get("graph_visualizations"):
                         state["graph_visualizations"] = []
                     state["graph_visualizations"].append(result)

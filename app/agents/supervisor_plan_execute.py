@@ -1,17 +1,23 @@
 """Supervisor Agent - Plan-and-Execute Architecture
 
-Replaces the old ReAct-based supervisor. The new supervisor:
-1. Planner: Analyzes user request, generates an execution plan (list of steps)
-2. Executor: Iterates through plan steps, invoking subgraphs via adapters
-3. Finalize: Extracts report result, generates HTML, attaches topology
-4. Direct Reply: For simple conversational responses (no sub-agent needed)
+Uses compiled subgraphs as direct graph nodes, making each sub-agent
+clickable in LangGraph Studio to reveal its internal structure.
 
 Graph structure:
 START → planner(LLM生成计划)
             │
             ├── empty plan / direct_reply → direct_reply → END
             │
-            └── has steps → executor(调度执行) ──→ executor(循环) ──→ finalize → END
+            └── has steps → executor(准备输入) → step_router:
+                               ├── detection(子图) → step_complete → executor → ...
+                               ├── diagnose(子图) → step_complete → executor → ...
+                               └── report  (子图) → step_complete → finalize → END
+
+To add a new sub-agent:
+  1. Add adapter in subgraph_registry.py
+  2. Add build_xxx_agent() in the agent module
+  3. Add entry in _build_subgraphs() below
+  4. Add state fields to PlanExecuteState if needed
 """
 
 import json
@@ -22,7 +28,7 @@ from langgraph.graph import StateGraph, END
 
 from app.models.plan_execute_state import PlanExecuteState, PlanStep
 from app.config.model_config import get_deepseek_llm
-from app.agents.subgraph_registry import get_adapter, get_subgraph
+from app.agents.subgraph_registry import get_adapter
 from app.utils.logger import get_logger
 from app.utils.prompt_loader import load_prompt
 from app.utils.llm_logger import get_trace_logger
@@ -47,7 +53,7 @@ def planner_node(state: PlanExecuteState) -> PlanExecuteState:
         # Try to extract from messages
         for msg in reversed(state.get("messages", [])):
             if isinstance(msg, HumanMessage):
-                user_input = str(msg.content) if isinstance(msg.content, str) else str(msg.content)
+                user_input = str(msg.content)
                 break
 
     # Load planner prompt
@@ -56,12 +62,29 @@ def planner_node(state: PlanExecuteState) -> PlanExecuteState:
     # Build messages for LLM
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_input},
     ]
+
+    # Inject session context as synthetic conversation history
+    session_context = state.get("session_context")
+    if session_context and session_context.get("csv_file_path"):
+        context_summary = _format_session_context(session_context)
+        messages.append({"role": "user", "content": context_summary})
+        messages.append({"role": "assistant", "content": "收到，已记录分析上下文。请问您还需要什么帮助？"})
+
+    messages.append({"role": "user", "content": user_input})
 
     try:
         llm = get_deepseek_llm(temperature=0)
-        response = llm.invoke(messages)
+
+        # M1: LLM retry + circuit breaker
+        from app.middleware.llm_error_handling import (
+            get_llm_retry_handler, LLMCircuitBreakerError, LLMMaxRetriesError,
+        )
+        response = get_llm_retry_handler().invoke(llm, messages)
+
+        # M6: Token usage tracking
+        from app.middleware.token_usage import get_token_tracker
+        get_token_tracker().track("supervisor_planner", response)
 
         # Trace LLM call
         get_trace_logger().log_llm_call(
@@ -72,8 +95,6 @@ def planner_node(state: PlanExecuteState) -> PlanExecuteState:
         )
 
         # Extract text content
-        content = response if isinstance(response, str) else str(response)
-        # Handle AIMessage objects
         if hasattr(response, "content"):
             content = response.content
             if isinstance(content, list):
@@ -82,6 +103,8 @@ def planner_node(state: PlanExecuteState) -> PlanExecuteState:
                     block.get("text", "") for block in content
                     if isinstance(block, dict) and block.get("type") == "text"
                 )
+        else:
+            content = str(response)
 
         # Parse JSON from response (may be wrapped in markdown code block)
         plan_data = _parse_plan_json(content)
@@ -92,6 +115,7 @@ def planner_node(state: PlanExecuteState) -> PlanExecuteState:
             state["plan_reasoning"] = content
             state["plan_reply"] = ""
             state["current_step_index"] = -1
+            state["_conversation_log"] = list(state.get("messages", []))
             return state
 
         steps = []
@@ -111,6 +135,9 @@ def planner_node(state: PlanExecuteState) -> PlanExecuteState:
         state["plan_reply"] = plan_data.get("reply", "")
         state["current_step_index"] = 0 if steps else -1
 
+        # Initialize conversation log with initial messages
+        state["_conversation_log"] = list(state.get("messages", []))
+
         logger.info(f"PLANNER: Generated plan with {len(steps)} steps")
         for step in steps:
             logger.info(f"  Step {step['step_id']}: {step['name']} (agent={step['agent']})")
@@ -121,8 +148,31 @@ def planner_node(state: PlanExecuteState) -> PlanExecuteState:
         state["plan_reasoning"] = f"Planning failed: {e}"
         state["plan_reply"] = ""
         state["current_step_index"] = -1
+        state["_conversation_log"] = list(state.get("messages", []))
 
     return state
+
+
+def _format_session_context(ctx: dict) -> str:
+    """Format session context as structured summary for the planner LLM."""
+    parts = ["## 历史分析上下文\n以下是前一轮分析的关键参数："]
+    if ctx.get("csv_file_path"):
+        parts.append(f"- 数据文件: {ctx['csv_file_path']}")
+    if ctx.get("inject_time"):
+        ts = ctx["inject_time"]
+        if isinstance(ts, (int, float)):
+            from app.utils.time_utils import format_unix_ts
+            ts = format_unix_ts(ts)
+        parts.append(f"- 故障注入时间: {ts}")
+    if ctx.get("abnormal_kpi"):
+        parts.append(f"- 异常 KPI: {ctx['abnormal_kpi']}")
+    if ctx.get("detection_summary"):
+        parts.append(f"- 检测结果: {ctx['detection_summary']}")
+    if ctx.get("completed_agents"):
+        names = {"detection": "异常检测", "diagnose": "根因推理", "report": "报告生成"}
+        completed = ", ".join(names.get(a, a) for a in ctx["completed_agents"])
+        parts.append(f"- 已完成步骤: {completed}")
+    return "\n".join(parts)
 
 
 def _parse_plan_json(content: str) -> Optional[dict]:
@@ -162,13 +212,27 @@ def route_after_planner(state: PlanExecuteState) -> str:
     return "executor"
 
 
+def step_router(state: PlanExecuteState) -> str:
+    """Route from executor to the appropriate compiled subgraph node."""
+    return state.get("pending_step_agent", "")
+
+
+def route_after_step(state: PlanExecuteState) -> str:
+    """Route after step_complete: loop to executor if more steps, else finalize."""
+    plan = state.get("plan", [])
+    idx = state.get("current_step_index", -1)
+
+    if idx < len(plan):
+        return "executor"
+    return "finalize"
+
+
 # ==================== Executor Node ====================
 
 def executor_node(state: PlanExecuteState) -> PlanExecuteState:
-    """Execute the current plan step by invoking the appropriate subgraph.
-
-    Uses the SubAgentAdapter interface for generic dispatch:
-      adapter.build_input(step.input, step_results) → subgraph.invoke() → adapter.extract_result()
+    """Prepare input for the current plan step by writing subgraph fields
+    directly into the unified state.  Clears messages so the subgraph
+    starts with a clean slate.
     """
     plan = state.get("plan", [])
     idx = state.get("current_step_index", -1)
@@ -180,61 +244,67 @@ def executor_node(state: PlanExecuteState) -> PlanExecuteState:
     step = plan[idx]
     step["status"] = "running"
 
-    logger.info(f"EXECUTOR: Running step {step['step_id']}: {step['name']} (agent={step['agent']})")
+    logger.info(f"EXECUTOR: Preparing step {step['step_id']}: {step['name']} (agent={step['agent']})")
 
+    adapter = get_adapter(step["agent"])
+    step_results = state.get("step_results", {})
+    input_state = adapter.build_input(step.get("input", {}), step_results)
+
+    # Write subgraph input fields directly into state (including messages=[])
+    state.update(input_state)
+    state["pending_step_agent"] = step["agent"]
+    state["pending_step_id"] = step["step_id"]
+
+    # Set agent name for tool tracing
     try:
-        adapter = get_adapter(step["agent"])
-        subgraph = get_subgraph(step["agent"])
-
-        # Set agent name for tool tracing
         from app.tools.langchain_tool_adapters import set_agent_name
         set_agent_name(step["agent"])
+    except ImportError:
+        pass
 
-        # Build input using adapter
-        step_results = state.get("step_results", {})
-        input_state = adapter.build_input(step.get("input", {}), step_results)
-
-        # Invoke subgraph
-        output = subgraph.invoke(input_state)
-
-        # Extract result using adapter
-        result = adapter.extract_result(output)
-
-        # Store in step_results
-        if "step_results" not in state:
-            state["step_results"] = {}
-        state["step_results"][step["step_id"]] = result
-
-        step["status"] = "completed" if result.get("success") else "failed"
-        if not result.get("success"):
-            step["error"] = result.get("summary", "未知错误")
-
-        logger.info(f"EXECUTOR: Step {step['step_id']} completed (success={result.get('success')})")
-
-    except Exception as e:
-        logger.error(f"EXECUTOR: Step {step['step_id']} failed: {e}")
-        step["status"] = "failed"
-        step["error"] = str(e)
-
-        if "step_results" not in state:
-            state["step_results"] = {}
-        state["step_results"][step["step_id"]] = {
-            "success": False,
-            "summary": f"步骤执行失败: {e}",
-        }
-
-    state["current_step_index"] = idx + 1
     return state
 
 
-def route_after_executor(state: PlanExecuteState) -> str:
-    """Route after executor: loop if more steps, finalize if done."""
-    plan = state.get("plan", [])
-    idx = state.get("current_step_index", -1)
+# ==================== Step Complete Node ====================
 
-    if idx < len(plan):
-        return "executor"
-    return "finalize"
+def step_complete_node(state: PlanExecuteState) -> PlanExecuteState:
+    """Extract results from the subgraph output (now in the unified state)
+    and store them in step_results.
+    """
+    idx = state.get("current_step_index", -1)
+    step_id = state.get("pending_step_id", -1)
+    agent = state.get("pending_step_agent", "")
+
+    adapter = get_adapter(agent)
+    result = adapter.extract_result(state)
+
+    step_results = dict(state.get("step_results", {}))
+    step_results[step_id] = result
+
+    plan = state.get("plan", [])
+    if 0 <= idx < len(plan):
+        plan[idx]["status"] = "completed" if result.get("success") else "failed"
+        if not result.get("success"):
+            plan[idx]["error"] = result.get("summary", "未知错误")
+
+    logger.info(f"STEP_COMPLETE: {agent} step {step_id} done (success={result.get('success')})")
+
+    # Accumulate subgraph messages into conversation log
+    log = list(state.get("_conversation_log") or [])
+    current_msgs = state.get("messages", [])
+    if current_msgs:
+        log.extend(current_msgs)
+
+    # Add step summary
+    log.append(AIMessage(content=f"--- {agent} step {step_id} completed ---"))
+
+    # Return minimal update — preserve plan/step_results, clear messages for next step
+    return {
+        "step_results": step_results,
+        "current_step_index": idx + 1,
+        "messages": [],
+        "_conversation_log": log,
+    }
 
 
 # ==================== Direct Reply Node ====================
@@ -254,7 +324,8 @@ def direct_reply_node(state: PlanExecuteState) -> PlanExecuteState:
     else:
         state["final_response"] = "您好！我是 AIOps 根因分析助手。请描述您的异常事件或提供数据文件，我将为您进行根因分析。"
 
-    state["messages"] = [AIMessage(content=state["final_response"])]
+    log = list(state.get("_conversation_log") or [])
+    state["messages"] = log + [AIMessage(content=state["final_response"])]
     state["continue_conversation"] = True
     logger.info(f"DIRECT_REPLY: Response generated")
     return state
@@ -345,10 +416,33 @@ def finalize_node(state: PlanExecuteState) -> PlanExecuteState:
         existing = final_msg.content if isinstance(final_msg.content, str) else str(final_msg.content)
         final_msg = AIMessage(content=existing + link_suffix)
 
-    state["messages"] = [final_msg]
+    # Build final messages from conversation log
+    log = list(state.get("_conversation_log") or [])
+    log.append(final_msg)
+    state["messages"] = log
     state["continue_conversation"] = True
     logger.info("FINALIZE: Final response built")
     return state
+
+
+# ==================== Subgraph Builder ====================
+
+def _build_subgraphs() -> Dict[str, object]:
+    """Build all compiled subgraphs and return {name: compiled_graph}.
+
+    To add a new sub-agent, add an entry here and ensure:
+      - Adapter exists in subgraph_registry.py
+      - State fields added to PlanExecuteState
+    """
+    from app.agents.detection_agent import build_detection_agent
+    from app.agents.diagnose_agent import build_diagnose_agent
+    from app.agents.report_agent import build_report_agent
+
+    return {
+        "detection": build_detection_agent(),
+        "diagnose": build_diagnose_agent(),
+        "report": build_report_agent(),
+    }
 
 
 # ==================== Graph Builder ====================
@@ -356,7 +450,8 @@ def finalize_node(state: PlanExecuteState) -> PlanExecuteState:
 def build_plan_execute_agent():
     """Build the Plan-Execute supervisor agent.
 
-    Graph: START → planner → [direct_reply | executor → ... → finalize] → END
+    Sub-agents are registered as compiled subgraph nodes, making them
+    expandable in LangGraph Studio (click to see internal ReAct loop).
 
     Returns:
         Compiled StateGraph
@@ -365,23 +460,37 @@ def build_plan_execute_agent():
 
     builder = StateGraph(PlanExecuteState)
 
-    # Add nodes
+    # Core nodes
     builder.add_node("planner", planner_node)
     builder.add_node("executor", executor_node)
+    builder.add_node("step_complete", step_complete_node)
     builder.add_node("direct_reply", direct_reply_node)
     builder.add_node("finalize", finalize_node)
+
+    # Register compiled subgraphs as nodes
+    subgraphs = _build_subgraphs()
+    step_router_map = {}
+    for agent_name, subgraph in subgraphs.items():
+        builder.add_node(agent_name, subgraph)
+        builder.add_edge(agent_name, "step_complete")
+        step_router_map[agent_name] = agent_name
 
     # Set entry point
     builder.set_entry_point("planner")
 
-    # Add conditional edges
+    # Planner routing
     builder.add_conditional_edges("planner", route_after_planner, {
         "executor": "executor",
         "direct_reply": "direct_reply",
     })
-    builder.add_conditional_edges("executor", route_after_executor, {
-        "executor": "executor",   # loop
-        "finalize": "finalize",   # plan complete
+
+    # Executor → subgraph routing
+    builder.add_conditional_edges("executor", step_router, step_router_map)
+
+    # Step complete → loop or finalize
+    builder.add_conditional_edges("step_complete", route_after_step, {
+        "executor": "executor",
+        "finalize": "finalize",
     })
 
     # Terminal edges
@@ -389,7 +498,7 @@ def build_plan_execute_agent():
     builder.add_edge("finalize", END)
 
     graph = builder.compile()
-    logger.info("Plan-Execute supervisor agent compiled")
+    logger.info(f"Plan-Execute supervisor agent compiled with subgraphs: {list(subgraphs.keys())}")
     return graph
 
 

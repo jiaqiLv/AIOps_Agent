@@ -49,6 +49,8 @@ class MainState(TypedDict, total=False):
     root_causes: Optional[List[Dict[str, Any]]]
     propagation_path: Optional[List[Dict[str, Any]]]
     graph_visualizations: Optional[List[Dict[str, Any]]]
+    # Multi-turn context memory
+    session_context: Optional[Dict[str, Any]]
 
 
 def supervisor_node(state: MainState) -> MainState:
@@ -62,12 +64,17 @@ def supervisor_node(state: MainState) -> MainState:
 
     logger.info("MAIN: Entering Plan-Execute supervisor")
 
-    # Ensure user_input from messages (for Studio where only messages is set)
-    if not state.get("user_input"):
-        for msg in reversed(state.get("messages", [])):
-            if isinstance(msg, HumanMessage):
-                state["user_input"] = _get_text(msg.content)
-                break
+    # Per-turn cleanup for Studio compatibility (CLI does this outside the graph)
+    from app.tools.langchain_tool_adapters import clear_csv_cache
+    clear_csv_cache()
+
+    # Always extract user_input from the latest HumanMessage.
+    # In Studio, state persists between turns but user_input is a plain
+    # field (no reducer), so it stays stale from the previous turn.
+    for msg in reversed(state.get("messages", [])):
+        if isinstance(msg, HumanMessage):
+            state["user_input"] = _get_text(msg.content)
+            break
 
     user_input = state.get("user_input", "")
 
@@ -86,6 +93,7 @@ def supervisor_node(state: MainState) -> MainState:
         "step_results": {},
         "final_response": None,
         "continue_conversation": True,
+        "session_context": state.get("session_context"),
     }
 
     # Invoke supervisor
@@ -96,35 +104,47 @@ def supervisor_node(state: MainState) -> MainState:
     state["final_response"] = result.get("final_response")
     state["action"] = "respond"
 
-    # Propagate sub-agent results from step_results
+    # Propagate sub-agent results and update session context in one pass
     step_results = result.get("step_results", {})
+    session_context = dict(state.get("session_context") or {})
+    completed_agents = session_context.get("completed_agents", [])
+
     for step in result.get("plan", []):
         sr = step_results.get(step["step_id"], {})
         if step["agent"] == "detection":
-            if sr.get("csv_file_path"):
-                state["csv_file_path"] = sr["csv_file_path"]
-            if sr.get("inject_time"):
-                state["inject_time"] = sr["inject_time"]
-            if sr.get("abnormal_kpi"):
-                state["abnormal_kpi"] = sr["abnormal_kpi"]
+            for key in ("csv_file_path", "inject_time", "abnormal_kpi"):
+                if sr.get(key):
+                    state[key] = sr[key]
             if sr.get("anomaly_report"):
                 state["anomaly_report"] = sr["anomaly_report"]
+            # Session context
+            if sr.get("success"):
+                session_context.update({
+                    "csv_file_path": sr.get("csv_file_path"),
+                    "inject_time": sr.get("inject_time"),
+                    "abnormal_kpi": sr.get("abnormal_kpi"),
+                    "detection_summary": (sr.get("summary") or "")[:200],
+                })
+                if "detection" not in completed_agents:
+                    completed_agents.append("detection")
         elif step["agent"] == "diagnose":
             state["diagnose_result"] = sr
-            if sr.get("csv_file_path"):
-                state["csv_file_path"] = sr["csv_file_path"]
-            if sr.get("inject_time"):
-                state["inject_time"] = sr["inject_time"]
-            if sr.get("abnormal_kpi"):
-                state["abnormal_kpi"] = sr["abnormal_kpi"]
-            if sr.get("fault_type"):
-                state["fault_type"] = sr["fault_type"]
-            if sr.get("root_causes"):
-                state["root_causes"] = sr["root_causes"]
-            if sr.get("propagation_path"):
-                state["propagation_path"] = sr["propagation_path"]
-            if sr.get("graph_visualizations"):
-                state["graph_visualizations"] = sr["graph_visualizations"]
+            for key in ("csv_file_path", "inject_time", "abnormal_kpi"):
+                if sr.get(key):
+                    state[key] = sr[key]
+            for key in ("fault_type", "root_causes", "propagation_path", "graph_visualizations"):
+                if sr.get(key):
+                    state[key] = sr[key]
+            # Session context
+            if sr.get("success"):
+                session_context.update({
+                    "diagnose_summary": (sr.get("summary") or "")[:200],
+                })
+                if "diagnose" not in completed_agents:
+                    completed_agents.append("diagnose")
+
+    session_context["completed_agents"] = completed_agents
+    state["session_context"] = session_context
 
     # Propagate ALL new messages (AIMessage, ToolMessage, etc.) so Studio shows
     # the full intermediate process — tool calls, tool results, and AI reasoning.

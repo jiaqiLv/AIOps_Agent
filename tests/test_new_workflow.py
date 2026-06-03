@@ -18,16 +18,26 @@ class TestSupervisorAgent:
     """Test Plan-Execute Supervisor Agent"""
 
     def test_supervisor_graph_structure(self):
-        """Verify supervisor has planner, executor, finalize nodes."""
-        from app.agents.supervisor_plan_execute import plan_execute_agent
+        """Verify supervisor has planner, executor, finalize, and subgraph nodes."""
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
 
-        graph = plan_execute_agent.get_graph()
-        nodes = list(graph.nodes.keys())
+        # Patch at the lowest level: DeepSeekModel._initialize -> ChatOpenAI.
+        # This catches all LLM creation regardless of import paths.
+        with patch('app.models.deepseek.ChatOpenAI', return_value=mock_llm):
+            from app.agents.supervisor_plan_execute import build_plan_execute_agent
+            graph = build_plan_execute_agent()
+
+        nodes = list(graph.get_graph().nodes.keys())
 
         assert "planner" in nodes, "Supervisor must have planner node"
         assert "executor" in nodes, "Supervisor must have executor node"
         assert "finalize" in nodes, "Supervisor must have finalize node"
         assert "direct_reply" in nodes, "Supervisor must have direct_reply node"
+        assert "step_complete" in nodes, "Supervisor must have step_complete node"
+        assert "detection" in nodes, "Supervisor must have detection subgraph node"
+        assert "diagnose" in nodes, "Supervisor must have diagnose subgraph node"
+        assert "report" in nodes, "Supervisor must have report subgraph node"
 
     def test_supervisor_state_schema(self):
         """Verify PlanExecuteState has required fields."""
@@ -40,6 +50,8 @@ class TestSupervisorAgent:
         assert "current_step_index" in schema
         assert "plan_reasoning" in schema
         assert "final_response" in schema
+        assert "_conversation_log" in schema
+        assert "session_context" in schema
 
 
 class TestDetectionAgent:
@@ -305,6 +317,182 @@ class TestModelsInit:
         assert PlanStep is not None
         assert DetectionAgentState is not None
         assert ReactAgentState is not None
+
+
+class TestSessionContext:
+    """Test multi-turn context memory (session_context)"""
+
+    def test_format_session_context_full(self):
+        """Test _format_session_context with all fields populated."""
+        from app.agents.supervisor_plan_execute import _format_session_context
+
+        ctx = {
+            "csv_file_path": "data/ZH_dataset/0105/data.csv",
+            "inject_time": 1736039280.0,
+            "abnormal_kpi": "cpu_usage",
+            "detection_summary": "Found 3 anomalies",
+            "completed_agents": ["detection"],
+        }
+        result = _format_session_context(ctx)
+
+        assert "历史分析上下文" in result
+        assert "data/ZH_dataset/0105/data.csv" in result
+        assert "cpu_usage" in result
+        assert "Found 3 anomalies" in result
+        assert "异常检测" in result
+
+    def test_format_session_context_timestamp_conversion(self):
+        """Test _format_session_context converts numeric timestamp."""
+        from app.agents.supervisor_plan_execute import _format_session_context
+
+        ctx = {
+            "csv_file_path": "data/test.csv",
+            "inject_time": 1736039280.0,
+        }
+        result = _format_session_context(ctx)
+        assert "故障注入时间" in result
+        # Numeric timestamp should be formatted, not shown as raw number
+        assert "2025" in result or "2026" in result
+
+    def test_format_session_context_string_timestamp(self):
+        """Test _format_session_context with string timestamp."""
+        from app.agents.supervisor_plan_execute import _format_session_context
+
+        ctx = {
+            "csv_file_path": "data/test.csv",
+            "inject_time": "2026-01-05 05:48:00",
+        }
+        result = _format_session_context(ctx)
+        assert "2026-01-05 05:48:00" in result
+
+    def test_format_session_context_empty(self):
+        """Test _format_session_context with minimal fields."""
+        from app.agents.supervisor_plan_execute import _format_session_context
+
+        ctx = {"csv_file_path": "data/test.csv"}
+        result = _format_session_context(ctx)
+        assert "历史分析上下文" in result
+        assert "data/test.csv" in result
+
+    def test_format_session_context_truncates_summary(self):
+        """Test that _format_session_context includes the summary as-is (truncation happens in supervisor_node)."""
+        from app.agents.supervisor_plan_execute import _format_session_context
+
+        long_summary = "x" * 300
+        ctx = {
+            "csv_file_path": "data/test.csv",
+            "detection_summary": long_summary,
+        }
+        result = _format_session_context(ctx)
+        # _format_session_context passes through the full summary
+        assert long_summary in result
+
+    def test_planner_node_injects_context(self):
+        """Test that planner_node injects session_context into messages."""
+        from app.agents.supervisor_plan_execute import planner_node
+
+        state = {
+            "user_input": "帮我进行故障分析",
+            "messages": [],
+            "session_context": {
+                "csv_file_path": "data/ZH_dataset/0105/data.csv",
+                "inject_time": 1736039280.0,
+                "abnormal_kpi": "cpu_usage",
+                "completed_agents": ["detection"],
+                "detection_summary": "Found anomalies",
+            },
+            "plan": [],
+            "current_step_index": -1,
+            "plan_reasoning": "",
+            "step_results": {},
+            "final_response": None,
+            "continue_conversation": True,
+        }
+
+        # Mock LLM to capture messages
+        captured_messages = []
+        mock_response = Mock()
+        mock_response.content = json.dumps({
+            "reasoning": "test",
+            "reply": "test reply",
+            "steps": [],
+        })
+
+        def mock_invoke(llm, messages):
+            captured_messages.extend(messages)
+            return mock_response
+
+        mock_retry_handler = Mock(invoke=mock_invoke)
+        mock_token_tracker = Mock(track=Mock())
+
+        with patch("app.agents.supervisor_plan_execute.get_deepseek_llm") as mock_llm_getter, \
+             patch("app.middleware.llm_error_handling.get_llm_retry_handler", return_value=mock_retry_handler), \
+             patch("app.middleware.token_usage.get_token_tracker", return_value=mock_token_tracker), \
+             patch("app.agents.supervisor_plan_execute.get_trace_logger") as mock_trace:
+            mock_trace.return_value = Mock(log_llm_call=Mock())
+            mock_llm = Mock()
+            mock_llm_getter.return_value = mock_llm
+
+            planner_node(state)
+
+        # Should have: system, user(context), assistant(ack), user(input)
+        assert len(captured_messages) == 4
+        assert "历史分析上下文" in captured_messages[1]["content"]
+        assert captured_messages[2]["role"] == "assistant"
+        assert captured_messages[3]["content"] == "帮我进行故障分析"
+
+    def test_planner_node_no_context(self):
+        """Test that planner_node works without session_context."""
+        from app.agents.supervisor_plan_execute import planner_node
+
+        state = {
+            "user_input": "你好",
+            "messages": [],
+            "session_context": None,
+            "plan": [],
+            "current_step_index": -1,
+            "plan_reasoning": "",
+            "step_results": {},
+            "final_response": None,
+            "continue_conversation": True,
+        }
+
+        captured_messages = []
+        mock_response = Mock()
+        mock_response.content = json.dumps({
+            "reasoning": "greeting",
+            "reply": "你好！",
+            "steps": [],
+        })
+
+        def mock_invoke(llm, messages):
+            captured_messages.extend(messages)
+            return mock_response
+
+        mock_retry_handler = Mock(invoke=mock_invoke)
+        mock_token_tracker = Mock(track=Mock())
+
+        with patch("app.agents.supervisor_plan_execute.get_deepseek_llm") as mock_llm_getter, \
+             patch("app.middleware.llm_error_handling.get_llm_retry_handler", return_value=mock_retry_handler), \
+             patch("app.middleware.token_usage.get_token_tracker", return_value=mock_token_tracker), \
+             patch("app.agents.supervisor_plan_execute.get_trace_logger") as mock_trace:
+            mock_trace.return_value = Mock(log_llm_call=Mock())
+            mock_llm = Mock()
+            mock_llm_getter.return_value = mock_llm
+
+            planner_node(state)
+
+        # Should have: system, user(input) — no context injection
+        assert len(captured_messages) == 2
+        assert captured_messages[0]["role"] == "system"
+        assert captured_messages[1]["content"] == "你好"
+
+    def test_main_state_has_session_context(self):
+        """Verify MainState includes session_context field."""
+        from app.agents.main_graph import MainState
+
+        schema = MainState.__annotations__
+        assert "session_context" in schema
 
 
 if __name__ == "__main__":

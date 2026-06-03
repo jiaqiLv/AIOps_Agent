@@ -13,7 +13,6 @@ from typing import Dict, Any, Optional
 
 import yaml
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
 
 from app.agents.nodes.react_nodes import (
     create_model_node,
@@ -122,7 +121,9 @@ def _create_llm_refine_final_node(refine_prompt_path: str, llm):
             )
 
         try:
-            result = llm.invoke([HumanMessage(content=prompt)])
+            # M1: LLM retry + circuit breaker
+            from app.middleware.llm_error_handling import get_llm_retry_handler
+            result = get_llm_retry_handler().invoke(llm, [HumanMessage(content=prompt)])
             content = result.content if hasattr(result, "content") else str(result)
 
             # Trace LLM call
@@ -482,7 +483,9 @@ def build_react_agent(config: Dict[str, Any]):
         llm_with_tools, system_prompt,
         first_iteration_instruction=first_instruction,
     ))
-    builder.add_node("tools", ToolNode(tools))
+    # M2: Safe tool node (wraps ToolNode with exception handling)
+    from app.middleware.tool_error_handling import create_safe_tool_node
+    builder.add_node("tools", create_safe_tool_node(tools))
     builder.add_node("extract_results", extract_results_node)
     builder.add_node("final", final_node)
 

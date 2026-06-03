@@ -27,7 +27,7 @@ wheels/
 # Virtual Environment
 venv/
 env/
-E               NV/
+ENV/
 .venv/
 
 # IDE
@@ -56,4 +56,4 @@ data/*.csv
 !data/sample_metrics.csv
 /data/
 /docs/
-/case.md
+/utils/deer-flow/

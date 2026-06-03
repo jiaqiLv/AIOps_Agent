@@ -348,25 +348,25 @@ class TestPlanExecuteNodes:
         }
         assert route_after_planner(state) == "direct_reply"
 
-    def test_route_after_executor_loop(self):
+    def test_route_after_step_loop(self):
         """Test routing back to executor when more steps remain."""
-        from app.agents.supervisor_plan_execute import route_after_executor
+        from app.agents.supervisor_plan_execute import route_after_step
 
         state = {
             "plan": [{"step_id": 1}, {"step_id": 2}],
             "current_step_index": 1,
         }
-        assert route_after_executor(state) == "executor"
+        assert route_after_step(state) == "executor"
 
-    def test_route_after_executor_done(self):
+    def test_route_after_step_done(self):
         """Test routing to finalize when all steps done."""
-        from app.agents.supervisor_plan_execute import route_after_executor
+        from app.agents.supervisor_plan_execute import route_after_step
 
         state = {
             "plan": [{"step_id": 1}],
             "current_step_index": 1,
         }
-        assert route_after_executor(state) == "finalize"
+        assert route_after_step(state) == "finalize"
 
     def test_direct_reply_node(self):
         """Test direct_reply_node generates response from plan_reply."""
