@@ -93,6 +93,13 @@ class ToolRegistry:
                 "module": "app.tools.pc_wrapper",
                 "function": "run_pc_analysis",
                 "required_fields": ["data"]
+            },
+            "bld_metric_tool": {
+                "name": "bld_metric_tool",
+                "description": "Run BLD Metric (ECOD) anomaly detection on time-series metrics",
+                "module": "app.tools.bld_metric_wrapper",
+                "function": "run_bld_metric_detection",
+                "required_fields": []
             }
         }
 

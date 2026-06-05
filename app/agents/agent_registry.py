@@ -204,119 +204,182 @@ def _create_structured_final_node():
 
 
 def _create_detection_structured_final_node():
-    """Final node that transforms three_sigma_result into structured anomaly_report.
+    """Final node that transforms detection results into structured anomaly_report.
 
+    Handles three_sigma_result, bld_metric_result, or both.
     No LLM call — descriptions are programmatically generated in Chinese.
-    Sets ``anomaly_report`` as structured per-metric records and
-    ``final_response`` as a simple summary string.
     """
     from datetime import datetime, timezone
+
+    def _build_three_sigma_records(anomalies_by_metric, parameters, metrics_checked, anomalies_found):
+        records = []
+        for metric, info in anomalies_by_metric.items():
+            points = info.get("points", [])
+            if not points:
+                continue
+            points_sorted = sorted(points, key=lambda p: p.get("timestamp", 0))
+            time_start = points_sorted[0]["timestamp"]
+            time_end = points_sorted[-1]["timestamp"]
+            time_start_str = datetime.fromtimestamp(time_start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            time_end_str = datetime.fromtimestamp(time_end, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            z_scores = [p.get("z_score", 0) for p in points_sorted]
+            values = [p.get("value", 0) for p in points_sorted]
+            baseline_mean = points_sorted[0].get("baseline_mean", 0)
+            baseline_std = points_sorted[0].get("baseline_std", 0)
+            anomaly_type = info.get("anomaly_type", "sudden_increase")
+            max_z = info.get("max_z_score", 0)
+            type_cn = "突增" if anomaly_type == "sudden_increase" else "骤降"
+            key_evidence = (
+                f"z-score 峰值 {max_z:.2f}，"
+                f"观测值从基线 {baseline_mean:.1f}±{baseline_std:.1f} "
+                f"飙升至 {min(values):.1f}~{max(values):.1f}"
+            )
+            description = (
+                f"指标 {metric} 在 {time_start_str} 至 {time_end_str} 期间发生{type_cn}，"
+                f"观测值从基线 {baseline_mean:.1f}±{baseline_std:.1f} "
+                f"偏离至 {min(values):.1f}~{max(values):.1f}，"
+                f"最大 z-score 为 {max_z:.2f}，"
+                f"共有 {len(points_sorted)} 个数据点超过 3σ 阈值。"
+            )
+            records.append({
+                "metric": metric, "algorithm": "3-sigma",
+                "anomaly_type": anomaly_type,
+                "anomaly_time_start": time_start, "anomaly_time_end": time_end,
+                "anomaly_time_start_str": time_start_str, "anomaly_time_end_str": time_end_str,
+                "max_z_score": max_z, "anomaly_point_count": len(points_sorted),
+                "baseline_mean": baseline_mean, "baseline_std": baseline_std,
+                "observation_min": min(values), "observation_max": max(values),
+                "z_score_range": [round(min(z_scores), 2), round(max(z_scores), 2)],
+                "key_evidence": key_evidence, "description": description,
+            })
+        records.sort(key=lambda r: r["max_z_score"], reverse=True)
+        return records, {
+            "algorithm": "3-sigma",
+            "baseline_window_minutes": f"{parameters.get('baseline_start_minutes', 30)}~{parameters.get('baseline_end_minutes', 60)}",
+            "detection_window_minutes": f"-{parameters.get('detect_before_minutes', 10)}~+{parameters.get('detect_minutes', 10)}",
+            "threshold_sigma": parameters.get("threshold", 3.0),
+            "metrics_checked": metrics_checked,
+            "anomalous_metric_count": len(records),
+            "anomaly_point_count": anomalies_found,
+        }
+
+    def _build_bld_metric_records(anomalies_by_metric, parameters, metrics_checked, anomalies_found):
+        records = []
+        for metric, info in anomalies_by_metric.items():
+            points = info.get("points", [])
+            if not points:
+                continue
+            points_sorted = sorted(points, key=lambda p: p.get("timestamp", 0))
+            time_start = points_sorted[0]["timestamp"]
+            time_end = points_sorted[-1]["timestamp"]
+            time_start_str = datetime.fromtimestamp(time_start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            time_end_str = datetime.fromtimestamp(time_end, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            scores = [p.get("score", 0) for p in points_sorted]
+            values = [p.get("value", 0) for p in points_sorted]
+            training_median = info.get("training_median", 0)
+            max_score = info.get("max_score", 0)
+            anomaly_type = info.get("anomaly_type", "sudden_increase")
+            type_cn = "突增" if anomaly_type == "sudden_increase" else "骤降"
+            train_hours = parameters.get("train_hours", 1.0)
+            key_evidence = (
+                f"ECOD 得分峰值 {max_score:.4f}，"
+                f"训练中位数 {training_median:.1f}，"
+                f"检测值范围 {min(values):.1f}~{max(values):.1f}"
+            )
+            description = (
+                f"指标 {metric} 在 {time_start_str} 至 {time_end_str} 期间发生{type_cn}，"
+                f"基于前 {train_hours}h 数据训练的 ECOD 模型检测到 "
+                f"{len(points_sorted)} 个异常点，"
+                f"训练中位数 {training_median:.1f}，"
+                f"最大异常得分 {max_score:.4f}。"
+            )
+            records.append({
+                "metric": metric, "algorithm": "bld_metric_ecod",
+                "anomaly_type": anomaly_type,
+                "anomaly_time_start": time_start, "anomaly_time_end": time_end,
+                "anomaly_time_start_str": time_start_str, "anomaly_time_end_str": time_end_str,
+                "max_score": max_score, "anomaly_point_count": len(points_sorted),
+                "training_median": training_median,
+                "observation_min": min(values), "observation_max": max(values),
+                "score_range": [round(min(scores), 4), round(max(scores), 4)],
+                "key_evidence": key_evidence, "description": description,
+            })
+        records.sort(key=lambda r: r.get("anomaly_point_count", 0), reverse=True)
+        return records, {
+            "algorithm": "bld_metric_ecod",
+            "train_hours": parameters.get("train_hours", 1.0),
+            "contamination": parameters.get("contamination", 0.001),
+            "train_rows": parameters.get("train_rows", 0),
+            "detect_rows": parameters.get("detect_rows", 0),
+            "metrics_checked": metrics_checked,
+            "anomalous_metric_count": len(records),
+            "anomaly_point_count": anomalies_found,
+        }
 
     def final_node(state: Dict) -> Dict:
         logger.info("REGISTRY: Building structured detection output")
 
         three_sigma = state.get("three_sigma_result")
+        bld_metric = state.get("bld_metric_result")
         anomaly_report = []
+        detection_params = None
 
+        # ── Process 3-sigma results ──────────────────────────
         if three_sigma and three_sigma.get("success"):
-            anomalies_by_metric = three_sigma.get("anomalies_by_metric", {})
-            parameters = three_sigma.get("parameters", {})
-            metrics_checked = three_sigma.get("metrics_checked", 0)
-            anomalies_found = three_sigma.get("anomalies_found", 0)
+            records, params = _build_three_sigma_records(
+                three_sigma.get("anomalies_by_metric", {}),
+                three_sigma.get("parameters", {}),
+                three_sigma.get("metrics_checked", 0),
+                three_sigma.get("anomalies_found", 0),
+            )
+            anomaly_report.extend(records)
+            detection_params = params
 
-            for metric, info in anomalies_by_metric.items():
-                points = info.get("points", [])
-                if not points:
-                    continue
-
-                points_sorted = sorted(points, key=lambda p: p.get("timestamp", 0))
-
-                time_start = points_sorted[0]["timestamp"]
-                time_end = points_sorted[-1]["timestamp"]
-                time_start_str = datetime.fromtimestamp(time_start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                time_end_str = datetime.fromtimestamp(time_end, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-                z_scores = [p.get("z_score", 0) for p in points_sorted]
-                values = [p.get("value", 0) for p in points_sorted]
-                baseline_mean = points_sorted[0].get("baseline_mean", 0)
-                baseline_std = points_sorted[0].get("baseline_std", 0)
-
-                anomaly_type = info.get("anomaly_type", "sudden_increase")
-                max_z = info.get("max_z_score", 0)
-                type_cn = "突增" if anomaly_type == "sudden_increase" else "骤降"
-
-                key_evidence = (
-                    f"z-score 峰值 {max_z:.2f}，"
-                    f"观测值从基线 {baseline_mean:.1f}±{baseline_std:.1f} "
-                    f"飙升至 {min(values):.1f}~{max(values):.1f}"
-                )
-
-                description = (
-                    f"指标 {metric} 在 {time_start_str} 至 {time_end_str} 期间发生{type_cn}，"
-                    f"观测值从基线 {baseline_mean:.1f}±{baseline_std:.1f} "
-                    f"偏离至 {min(values):.1f}~{max(values):.1f}，"
-                    f"最大 z-score 为 {max_z:.2f}，"
-                    f"共有 {len(points_sorted)} 个数据点超过 3σ 阈值。"
-                )
-
-                record = {
-                    "metric": metric,
-                    "anomaly_type": anomaly_type,
-                    "anomaly_time_start": time_start,
-                    "anomaly_time_end": time_end,
-                    "anomaly_time_start_str": time_start_str,
-                    "anomaly_time_end_str": time_end_str,
-                    "max_z_score": max_z,
-                    "anomaly_point_count": len(points_sorted),
-                    "baseline_mean": baseline_mean,
-                    "baseline_std": baseline_std,
-                    "observation_min": min(values),
-                    "observation_max": max(values),
-                    "z_score_range": [round(min(z_scores), 2), round(max(z_scores), 2)],
-                    "key_evidence": key_evidence,
-                    "description": description,
-                }
-                anomaly_report.append(record)
-
-            # Sort by max_z_score descending
-            anomaly_report.sort(key=lambda r: r["max_z_score"], reverse=True)
-
-            state["anomaly_report"] = anomaly_report
-
-            # Store detection parameters for downstream report generation
-            state["detection_parameters"] = {
-                "algorithm": "3-sigma",
-                "baseline_window_minutes": f"{parameters.get('baseline_start_minutes', 30)}~{parameters.get('baseline_end_minutes', 60)}",
-                "detection_window_minutes": f"-{parameters.get('detect_before_minutes', 10)}~+{parameters.get('detect_minutes', 10)}",
-                "threshold_sigma": parameters.get("threshold", 3.0),
-                "metrics_checked": metrics_checked,
-                "anomalous_metric_count": len(anomaly_report),
-                "anomaly_point_count": anomalies_found,
-            }
-
-            # Build simple summary string
-            if anomaly_report:
-                parts = [
-                    "3-Sigma 异常检测完成",
-                    f"- 扫描指标数: {metrics_checked}",
-                    f"- 异常指标数: {len(anomaly_report)}",
-                    f"- 异常数据点: {anomalies_found}",
-                    "\n最异常指标:",
-                ]
-                for r in anomaly_report[:5]:
-                    type_cn = "突增" if r["anomaly_type"] == "sudden_increase" else "骤降"
-                    parts.append(f"  - {r['metric']}: {type_cn}, max z-score={r['max_z_score']:.2f}")
-                state["final_response"] = "\n".join(parts)
+        # ── Process BLD Metric results ───────────────────────
+        if bld_metric and bld_metric.get("success"):
+            records, params = _build_bld_metric_records(
+                bld_metric.get("anomalies_by_metric", {}),
+                bld_metric.get("parameters", {}),
+                bld_metric.get("metrics_checked", 0),
+                bld_metric.get("anomalies_found", 0),
+            )
+            anomaly_report.extend(records)
+            if detection_params is None:
+                detection_params = params
             else:
-                state["final_response"] = (
-                    f"3-Sigma 异常检测完成: 扫描 {three_sigma.get('metrics_checked', 0)} 个指标，"
-                    f"未发现超过阈值的异常指标。"
-                )
+                detection_params["algorithm"] = "3-sigma + bld_metric_ecod"
+                detection_params["bld_train_hours"] = params.get("train_hours", 1.0)
+
+        # ── Sort and store ───────────────────────────────────
+        if anomaly_report:
+            anomaly_report.sort(key=lambda r: r.get("anomaly_point_count", 0), reverse=True)
+            state["anomaly_report"] = anomaly_report
+            state["detection_parameters"] = detection_params
+
+            algo_name = detection_params.get("algorithm", "异常检测") if detection_params else "异常检测"
+            parts = [
+                f"{algo_name} 完成",
+                f"- 扫描指标数: {detection_params.get('metrics_checked', 0) if detection_params else 0}",
+                f"- 异常指标数: {len(anomaly_report)}",
+                f"- 异常数据点: {detection_params.get('anomaly_point_count', 0) if detection_params else sum(r.get('anomaly_point_count', 0) for r in anomaly_report)}",
+                "\n最异常指标:",
+            ]
+            for r in anomaly_report[:5]:
+                type_cn = "突增" if r["anomaly_type"] == "sudden_increase" else "骤降"
+                if r.get("algorithm") == "bld_metric_ecod":
+                    parts.append(f"  - {r['metric']}: {type_cn}, ECOD score={r.get('max_score', 0):.4f}")
+                else:
+                    parts.append(f"  - {r['metric']}: {type_cn}, max z-score={r.get('max_z_score', 0):.2f}")
+            state["final_response"] = "\n".join(parts)
         else:
-            err = three_sigma.get("error", "未执行") if three_sigma else "未执行"
+            err_parts = []
+            if three_sigma:
+                err_parts.append(f"3-Sigma: {three_sigma.get('error', '未发现异常')}")
+            if bld_metric:
+                err_parts.append(f"BLD Metric: {bld_metric.get('error', '未发现异常')}")
             state["anomaly_report"] = []
             state["detection_parameters"] = None
-            state["final_response"] = f"3-Sigma 异常检测失败: {err}"
+            state["final_response"] = "异常检测未发现异常指标。" if not err_parts else "异常检测失败: " + "; ".join(err_parts)
 
         _ensure_abnormal_kpi(state)
 
@@ -377,8 +440,8 @@ def _create_route_after_extract(termination_signal: Optional[str] = None):
 
 def _fallback_detection_summary(state: Dict) -> str:
     """Build a simple string summary when LLM refine fails."""
-    import json
     three_sigma = state.get("three_sigma_result", {})
+    bld_metric = state.get("bld_metric_result", {})
     parts = []
 
     csv_path = state.get("csv_file_path", "")
@@ -395,20 +458,37 @@ def _fallback_detection_summary(state: Dict) -> str:
         parts.append(f"\n3-Sigma 异常检测成功: 发现 {len(anomalies)} 个异常指标")
         for a in anomalies[:10]:
             parts.append(f"  - {a['metric']}: z={a['z_score']:.2f}")
-    else:
+    elif three_sigma:
         err = three_sigma.get("error", "未执行") if three_sigma else "未执行"
         parts.append(f"\n3-Sigma 异常检测失败: {err}")
 
-    return "\n".join(parts)
+    if bld_metric and bld_metric.get("success"):
+        anomalies = bld_metric.get("anomalies", [])
+        parts.append(f"\nBLD Metric (ECOD) 异常检测成功: 发现 {len(anomalies)} 个异常指标")
+        for a in anomalies[:10]:
+            parts.append(f"  - {a['metric']}: score={a.get('score', 0):.4f}")
+    elif bld_metric:
+        err = bld_metric.get("error", "未执行") if bld_metric else "未执行"
+        parts.append(f"\nBLD Metric (ECOD) 异常检测失败: {err}")
+
+    return "\n".join(parts) if parts else "异常检测未执行。"
 
 
 def _ensure_abnormal_kpi(state: Dict):
     """Set abnormal_kpi from top anomaly if not already set."""
     if state.get("abnormal_kpi"):
         return
+    # Check three_sigma first
     three_sigma = state.get("three_sigma_result", {})
     if isinstance(three_sigma, dict) and three_sigma.get("success"):
         anomalies = three_sigma.get("anomalies", [])
+        if anomalies:
+            state["abnormal_kpi"] = anomalies[0]["metric"]
+            return
+    # Fall back to bld_metric
+    bld_metric = state.get("bld_metric_result", {})
+    if isinstance(bld_metric, dict) and bld_metric.get("success"):
+        anomalies = bld_metric.get("anomalies", [])
         if anomalies:
             state["abnormal_kpi"] = anomalies[0]["metric"]
 

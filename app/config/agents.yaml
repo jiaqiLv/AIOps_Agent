@@ -16,10 +16,10 @@ agents:
     workflow: react_tool_loop
     state_schema: app.models.detection_agent_state.DetectionAgentState
     system_prompt: app/prompts/detection_system.md
-    first_iteration_instruction: "请从任务描述中提取故障日期和时间，构造 data_path 和 inject_time，然后调用 csv_reader_tool 加载指标数据。"
+    first_iteration_instruction: "请从任务描述中提取 data_path，调用 csv_reader_tool 加载数据。加载成功后调用 bld_metric_tool 进行异常检测。"
     tools:
       - csv_reader_tool
-      - three_sigma_tool
+      - bld_metric_tool
     model:
       provider: deepseek
       name: deepseek-chat

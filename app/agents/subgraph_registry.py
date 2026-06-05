@@ -31,7 +31,7 @@ class SubAgentAdapter:
 
 
 class DetectionAdapter(SubAgentAdapter):
-    """Adapter for the Detection Agent (3-Sigma anomaly detection)."""
+    """Adapter for the Detection Agent (3-Sigma / BLD Metric anomaly detection)."""
 
     name = "detection"
 
@@ -48,19 +48,28 @@ class DetectionAdapter(SubAgentAdapter):
         }
 
     def extract_result(self, output: dict) -> dict:
-        # Extract inject_time from three_sigma_result parameters (reliable source)
+        # Extract inject_time from three_sigma_result or bld_metric_result parameters
         three_sigma = output.get("three_sigma_result", {})
+        bld_metric = output.get("bld_metric_result", {})
         inject_time = output.get("inject_time") or (
             three_sigma.get("parameters", {}).get("inject_time")
         )
+        # Determine overall success: either algorithm succeeded
+        success = bool(
+            three_sigma.get("success", False)
+            or bld_metric.get("success", False)
+        )
+        # Merge anomaly_report from both sources
+        anomaly_report = list(output.get("anomaly_report", []))
         return {
-            "success": bool(three_sigma.get("success", False)),
+            "success": success,
             "summary": output.get("final_response", ""),
             "csv_file_path": output.get("csv_file_path"),
             "inject_time": inject_time,
             "abnormal_kpi": output.get("abnormal_kpi"),
             "three_sigma_result": three_sigma,
-            "anomaly_report": output.get("anomaly_report", []),
+            "bld_metric_result": bld_metric,
+            "anomaly_report": anomaly_report,
             "detection_parameters": output.get("detection_parameters"),
         }
 

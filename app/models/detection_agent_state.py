@@ -1,7 +1,7 @@
 """Detection Agent State
 
-State schema for the detection agent that performs 3-sigma anomaly
-detection on metrics data.
+State schema for the detection agent that performs anomaly detection
+on metrics data (3-Sigma, BLD Metric ECOD).
 """
 
 from typing import Dict, Any, List, Optional, TypedDict, Annotated
@@ -12,8 +12,8 @@ from langgraph.graph import add_messages
 class DetectionAgentState(TypedDict, total=False):
     """State for the detection agent ReAct loop.
 
-    The detection agent loads CSV data and runs 3-sigma anomaly
-    detection to identify abnormal metrics.
+    The detection agent loads CSV data and runs anomaly detection
+    (3-Sigma / BLD Metric ECOD) to identify abnormal metrics.
     """
 
     # Core conversation
@@ -34,6 +34,7 @@ class DetectionAgentState(TypedDict, total=False):
 
     # Detection result
     three_sigma_result: Optional[Dict[str, Any]]
+    bld_metric_result: Optional[Dict[str, Any]]
 
     # Detection parameters (baseline/detection window, threshold, metrics info)
     detection_parameters: Optional[Dict[str, Any]]

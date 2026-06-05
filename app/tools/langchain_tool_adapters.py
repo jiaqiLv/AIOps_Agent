@@ -271,6 +271,43 @@ def _wrap_pc_tool(func: Callable) -> Callable:
     return wrapper
 
 
+def _wrap_bld_metric(func: Callable) -> Callable:
+    """Wrap BLD Metric tool to use cached CSV data."""
+    def wrapper(train_hours: float = 1.0, contamination: float = 0.001,
+                metric_columns: Optional[List[str]] = None, **kwargs) -> str:
+        logger.info(f"TOOL: bld_metric_tool called with train_hours={train_hours}, contamination={contamination}")
+
+        if not _csv_data_cache:
+            return json.dumps({
+                "success": False,
+                "error": "CSV data not loaded. Please call csv_reader_tool first.",
+                "anomalies": [],
+            }, ensure_ascii=False)
+
+        df = list(_csv_data_cache.values())[0]
+
+        try:
+            result = func(
+                data=df,
+                train_hours=train_hours,
+                contamination=contamination,
+                metric_columns=metric_columns,
+            )
+            if isinstance(result, dict):
+                return json.dumps(result, ensure_ascii=False)
+            return result
+
+        except Exception as e:
+            logger.error(f"BLD Metric tool failed: {e}")
+            return json.dumps({
+                "success": False,
+                "error": str(e),
+                "anomalies": [],
+            }, ensure_ascii=False)
+
+    return wrapper
+
+
 def _wrap_graph_visualization(func: Callable) -> Callable:
     """Wrap graph visualization tool to return JSON string.
 
@@ -424,6 +461,13 @@ class ThreeSigmaInput(BaseModel):
     metric_columns: Optional[List[str]] = Field(default=None, description="Specific metric columns to check; if None, all numeric columns except 'time'")
 
 
+class BldMetricInput(BaseModel):
+    """Input schema for bld_metric_tool"""
+    train_hours: float = Field(default=1.0, description="训练窗口长度（小时），取数据前 N 小时训练 ECOD 模型（默认 1.0）")
+    contamination: float = Field(default=0.001, description="预期异常比例，ECOD 模型参数（默认 0.001）")
+    metric_columns: Optional[List[str]] = Field(default=None, description="指定检测的指标列；为 None 时检测所有数值列")
+
+
 class GraphVisualizationToolInput(BaseModel):
     """Input schema for graph_visualization_tool"""
     edges: List[List[str]] = Field(..., description="List of directed edges [[source, target], ...]")
@@ -482,6 +526,9 @@ def create_langchain_tools(
         elif tool_name == "pc_tool":
             wrapped_func = _wrap_pc_tool(tool_func)
             args_schema = PcToolInput
+        elif tool_name == "bld_metric_tool":
+            wrapped_func = _wrap_bld_metric(tool_func)
+            args_schema = BldMetricInput
         elif tool_name == "graph_visualization_tool":
             wrapped_func = _wrap_graph_visualization(tool_func)
             args_schema = GraphVisualizationToolInput

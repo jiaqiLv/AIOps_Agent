@@ -6,7 +6,7 @@
 
 | Agent | 能力 | 需要的输入 |
 |-------|------|-----------|
-| detection | 3-Sigma 异常检测 | task_description（含完整用户请求，子 Agent 会从中提取日期和参数） |
+| detection | 异常检测（BLD Metric ECOD）| task_description（含完整用户请求，子 Agent 会从中提取日期和参数） |
 | diagnose | IAF-RCL + KE-FPC 根因推理 | task_description（含完整用户请求，子 Agent 会从中提取日期和参数）, abnormal_kpi(可选) |
 | report | 根据检测和诊断结果生成自然语言报告 | task_description（含完整用户请求） |
 
@@ -199,3 +199,4 @@
 - IAF-RCL（不用 RCD）
 - KE-FPC（不用 PC）
 - 3-Sigma（不用 Three Sigma）
+- BLD Metric (ECOD)（不用 BLD Metric ECOD 以外的写法）

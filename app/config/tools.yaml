@@ -50,6 +50,15 @@ tools:
     required_fields:
       - inject_time
 
+  bld_metric_tool:
+    name: bld_metric_tool
+    description: 使用BLD Metric算法(ECOD)进行异常检测，取前N小时数据训练模型，检测后续数据中的异常指标
+    module: app.tools.bld_metric_wrapper
+    function: run_bld_metric_detection
+    args_schema: BldMetricInput
+    return_schema: AlgorithmResult
+    required_fields: []
+
   graph_visualization_tool:
     name: graph_visualization_tool
     description: 生成故障传播图的可视化展示，用不同颜色区分KPI节点和根因节点

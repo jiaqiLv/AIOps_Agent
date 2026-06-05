@@ -1,0 +1,38 @@
+tool实现需要文件
+  层级: 核心算法
+  文件: app/tools/three_sigma.py
+  实现内容: 新文件：如 app/tools/your_tool.py
+  ────────────────────────────────────────
+  层级: Pydantic schema
+  文件: app/tools/langchain_tool_adapters.py
+  实现内容: 新增 YourToolInput 类
+  ────────────────────────────────────────
+  层级: LangChain wrapper
+  文件: app/tools/langchain_tool_adapters.py
+  实现内容: 新增 _wrap_your_tool() 函数
+  ────────────────────────────────────────
+  层级: 工具工厂注册
+  文件: app/tools/langchain_tool_adapters.py
+  实现内容: 在 create_langchain_tools() 中添加 elif 分支
+  ────────────────────────────────────────
+  层级: YAML 配置
+  文件: app/config/tools.yaml
+  实现内容: 新增工具配置条目
+  ────────────────────────────────────────
+  层级: Fallback 注册
+  文件: app/tools/tool_registry.py
+  实现内容: 新增 fallback 条目
+  ────────────────────────────────────────
+  层级: Agent 允许列表
+  文件: app/agents/agent_factory.py
+  实现内容: 将工具名添加到 agent 的 tools 列表
+  ────────────────────────────────────────
+  层级: 提示词
+  文件: app/prompts/diagnose_system.md 等
+  实现内容: 告知 LLM 何时使用该工具
+
+目前需要实现ecod，暂时不实现fft和那个自相关算法
+
+在调用过程中，data在内存里是个pd列表
+
+langgraph dev --host 0.0.0.0 --port 2024 --tunnel

@@ -3,7 +3,7 @@
 Exports:
 - main_graph: The main entry point graph (START → supervisor → END)
 - supervisor_agent: Plan-Execute supervisor (planner → executor → reporter)
-- detection_agent: Detection subgraph for 3-Sigma anomaly detection
+- detection_agent: Detection subgraph for BLD Metric (ECOD) anomaly detection
 - diagnose_agent: Diagnose subgraph for root cause analysis (structured results)
 - report_agent: Report agent for NL report generation from structured data
 """

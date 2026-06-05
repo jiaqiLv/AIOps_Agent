@@ -70,6 +70,7 @@ class PlanExecuteState(TypedDict, total=False):
 
     # ==================== Detection Output Fields ====================
     three_sigma_result: Optional[Dict[str, Any]]
+    bld_metric_result: Optional[Dict[str, Any]]
     anomaly_report: Optional[List[Dict[str, Any]]]
     detection_parameters: Optional[Dict[str, Any]]
 

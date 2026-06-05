@@ -97,6 +97,9 @@ class ReactAgentState(TypedDict, total=False):
     three_sigma_result: Optional[Dict[str, Any]]
     """3-sigma anomaly detection result (legacy, also in tool_results["three_sigma_tool"])"""
 
+    bld_metric_result: Optional[Dict[str, Any]]
+    """BLD Metric (ECOD) anomaly detection result"""
+
     rcd_result: Optional[Dict[str, Any]]
     """IAF-RCL algorithm result (legacy, also in tool_results["rcd_tool"])"""
 

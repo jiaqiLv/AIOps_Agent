@@ -20,7 +20,7 @@ def print_banner():
     print("=" * 60)
     print()
     print("我可以帮您进行异常检测和故障根因分析：")
-    print("- 使用 3-Sigma 算法检测异常指标")
+    print("- 使用 BLD Metric (ECOD) 算法检测异常指标")
     print("- 使用 IAF-RCL 算法识别根因指标")
     print("- 使用 KE-FPC 算法生成故障传播图")
     print("- 综合多个算法结果进行精确定位")

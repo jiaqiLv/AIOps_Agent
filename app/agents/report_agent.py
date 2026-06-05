@@ -124,7 +124,7 @@ def generate_report_node(state: ReportAgentState) -> ReportAgentState:
             )
         else:
             prompt = (
-                f"你是一个 AIOps 异常检测专家。请基于以下 3-Sigma 检测数据生成中文异常检测报告。\n\n"
+                f"你是一个 AIOps 异常检测专家。请基于以下检测数据生成中文异常检测报告（可能包含 3-Sigma 和/或 BLD Metric (ECOD) 算法结果）。\n\n"
                 f"## 任务描述\n{task_description}\n\n"
                 f"## 上下文\n{meta_str}\n\n"
                 f"{detection_str}\n\n"

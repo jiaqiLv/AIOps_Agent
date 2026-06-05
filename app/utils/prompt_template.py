@@ -24,6 +24,8 @@ def render_template(template_path: str, variables: Dict[str, str]) -> str:
 def format_detection_summary(detection_result: Optional[Dict[str, Any]]) -> str:
     """Format detection agent results into a structured summary string.
 
+    Handles both 3-Sigma and BLD Metric (ECOD) results.
+
     Args:
         detection_result: The detection_result dict from supervisor state.
 
@@ -50,34 +52,53 @@ def format_detection_summary(detection_result: Optional[Dict[str, Any]]) -> str:
     if inject_time:
         parts.append(f"故障注入时间: {format_inject_time(inject_time)}")
 
-    success = detection_result.get("success", False)
-    if success:
+    # ── Format 3-Sigma results ──────────────────────────
+    three_sigma = detection_result.get("three_sigma_result")
+    if three_sigma and three_sigma.get("success"):
         parts.append("\n3-Sigma 异常检测: 成功")
-
-        # Format anomalies_by_metric summary
-        anomalies_by_metric = detection_result.get("anomalies_by_metric")
-        if anomalies_by_metric:
-            parts.append(f"异常指标数: {len(anomalies_by_metric)}")
-            parts.append("")
-            for metric, info in anomalies_by_metric.items():
-                anomaly_type = info.get("anomaly_type", "unknown")
-                type_cn = "突增" if anomaly_type == "sudden_increase" else "骤降"
-                max_z = info.get("max_z_score", 0)
-                point_count = len(info.get("points", []))
-                parts.append(
-                    f"- **{metric}**: {type_cn}, 最大 z-score={max_z:.2f}, "
-                    f"异常点数={point_count}"
-                )
-            parts.append("")
-
-        abnormal_kpi = detection_result.get("abnormal_kpi")
-        if abnormal_kpi:
-            parts.append(f"最异常指标 (abnormal_kpi): {abnormal_kpi}")
-    else:
-        error_msg = detection_result.get("error", "Unknown")
+        parts.extend(_format_anomaly_by_metric(three_sigma.get("anomalies_by_metric", {}), "z-score"))
+    elif three_sigma:
+        error_msg = three_sigma.get("error", "Unknown")
         parts.append(f"\n3-Sigma 异常检测: 失败 — {error_msg}")
 
+    # ── Format BLD Metric results ───────────────────────
+    bld_metric = detection_result.get("bld_metric_result")
+    if bld_metric and bld_metric.get("success"):
+        parts.append("\nBLD Metric (ECOD) 异常检测: 成功")
+        parts.extend(_format_anomaly_by_metric(bld_metric.get("anomalies_by_metric", {}), "ECOD score"))
+    elif bld_metric:
+        error_msg = bld_metric.get("error", "Unknown")
+        parts.append(f"\nBLD Metric (ECOD) 异常检测: 失败 — {error_msg}")
+
+    # ── Common: abnormal KPI ────────────────────────────
+    if not parts and not three_sigma and not bld_metric:
+        return "异常检测无结果。"
+
+    abnormal_kpi = detection_result.get("abnormal_kpi")
+    if abnormal_kpi:
+        parts.append(f"\n最异常指标 (abnormal_kpi): {abnormal_kpi}")
+
     return "\n".join(parts) if parts else "异常检测无结果。"
+
+
+def _format_anomaly_by_metric(anomalies_by_metric: dict, score_label: str) -> list:
+    """Format anomalies_by_metric dict into markdown list lines."""
+    lines = []
+    if not anomalies_by_metric:
+        return lines
+    lines.append(f"异常指标数: {len(anomalies_by_metric)}")
+    lines.append("")
+    for metric, info in anomalies_by_metric.items():
+        anomaly_type = info.get("anomaly_type", "unknown")
+        type_cn = "突增" if anomaly_type == "sudden_increase" else "骤降"
+        max_score = info.get("max_z_score") or info.get("max_score", 0)
+        point_count = len(info.get("points", []))
+        lines.append(
+            f"- **{metric}**: {type_cn}, 最大 {score_label}={max_score:.2f}, "
+            f"异常点数={point_count}"
+        )
+    lines.append("")
+    return lines
 
 
 def format_diagnose_summary(
@@ -172,13 +193,13 @@ def format_detection_structured(
 ) -> str:
     """Format detection anomaly_report records as markdown string.
 
-    Produces two sections:
-      1. Summary table (overview of all anomalous metrics)
-      2. Detail section (per-metric: anomaly time, type, key evidence, description)
+    Handles both 3-Sigma and BLD Metric (ECOD) records.  Each record carries
+    an ``algorithm`` field ("3-sigma" or "bld_metric_ecod") that determines
+    which columns are rendered.
 
     Args:
         anomaly_report: List of per-metric anomaly records from detection agent.
-        detection_parameters: Detection algorithm parameters (window info, metrics counts).
+        detection_parameters: Detection algorithm parameters.
 
     Returns:
         Formatted markdown string for template injection.
@@ -186,21 +207,39 @@ def format_detection_structured(
     if not anomaly_report:
         return "异常检测未返回结果。"
 
-    parts = ["## 3-Sigma 异常检测结果\n"]
+    # Detect which algorithms contributed
+    algorithms = set(r.get("algorithm", "3-sigma") for r in anomaly_report)
+    algo_names = []
+    if "3-sigma" in algorithms:
+        algo_names.append("3-Sigma")
+    if "bld_metric_ecod" in algorithms:
+        algo_names.append("BLD Metric (ECOD)")
+    algo_label = " + ".join(algo_names) if algo_names else "异常检测"
 
-    # Include detection parameters if available
+    parts = [f"## {algo_label} 异常检测结果\n"]
+
+    # Build detection method description from parameters
     if detection_parameters:
-        baseline_win = detection_parameters.get("baseline_window_minutes", "未提供")
-        detection_win = detection_parameters.get("detection_window_minutes", "未提供")
-        threshold = detection_parameters.get("threshold_sigma", 3.0)
+        algo = detection_parameters.get("algorithm", "")
+        method_parts = []
+        if "3-sigma" in algo:
+            baseline_win = detection_parameters.get("baseline_window_minutes", "?")
+            detection_win = detection_parameters.get("detection_window_minutes", "?")
+            threshold = detection_parameters.get("threshold_sigma", 3.0)
+            method_parts.append(
+                f"3-Sigma（基线窗口: {baseline_win} / 检测窗口: {detection_win} / 阈值: {threshold}σ）"
+            )
+        if "bld_metric" in algo:
+            train_h = detection_parameters.get("train_hours", "?")
+            contam = detection_parameters.get("contamination", "?")
+            method_parts.append(
+                f"BLD Metric (ECOD)（训练: 前 {train_h} h / contamination: {contam}）"
+            )
+        if method_parts:
+            parts.append(f"**检测方法**: {' + '.join(method_parts)}\n")
         metrics_checked = detection_parameters.get("metrics_checked", 0)
         anomalous_count = detection_parameters.get("anomalous_metric_count", len(anomaly_report))
         anomaly_points = detection_parameters.get("anomaly_point_count", 0)
-
-        parts.append(
-            f"**检测方法**: 3-Sigma（基线窗口: {baseline_win} min / "
-            f"检测窗口: {detection_win} min / 阈值: {threshold}σ）\n"
-        )
         parts.append(
             f"**检测概况**: 扫描 {metrics_checked} 个指标，"
             f"检出 {anomalous_count} 个异常指标，共 {anomaly_points} 个异常数据点\n"
@@ -208,29 +247,60 @@ def format_detection_structured(
     else:
         parts.append(f"检出异常指标 {len(anomaly_report)} 个：\n")
 
-    # --- Summary table ---
+    # ── Summary table ────────────────────────────────────
     parts.append("\n### 异常指标概览\n")
-    parts.append(
-        "| # | 指标名称 | 异常类型 | 异常时段 | z-score | 基线 μ±σ | 观测值范围 |"
-    )
-    parts.append("|---|---------|---------|---------|---------|----------|-----------|")
+    has_bld = "bld_metric_ecod" in algorithms
+    if has_bld:
+        parts.append(
+            "| # | 算法 | 指标名称 | 异常类型 | 异常时段 | 关键得分 | 基线/中位数 | 观测值范围 |"
+        )
+        parts.append(
+            "|---|------|---------|---------|---------|---------|----------|-----------|"
+        )
+    else:
+        parts.append(
+            "| # | 指标名称 | 异常类型 | 异常时段 | z-score | 基线 μ±σ | 观测值范围 |"
+        )
+        parts.append(
+            "|---|---------|---------|---------|---------|----------|-----------|"
+        )
 
     for i, record in enumerate(anomaly_report, 1):
         anomaly_type = record.get("anomaly_type", "unknown")
         type_cn = "突增" if anomaly_type == "sudden_increase" else "骤降"
         time_start = record.get("anomaly_time_start_str", "?")
         time_end = record.get("anomaly_time_end_str", "?")
-        # Show only HH:MM:SS if same day
         if time_start != "?" and time_end != "?" and time_start[:10] == time_end[:10]:
             time_range = f"{time_start[11:]} ~ {time_end[11:]}"
         else:
             time_range = f"{time_start} ~ {time_end}"
-        parts.append(
-            f"| {i} | {record['metric']} | {type_cn} | {time_range} | "
-            f"{record.get('max_z_score', 0):.2f} | "
-            f"{record.get('baseline_mean', 0):.1f}±{record.get('baseline_std', 0):.1f} | "
-            f"{record.get('observation_min', 0):.1f} ~ {record.get('observation_max', 0):.1f} |"
-        )
+
+        algo = record.get("algorithm", "3-sigma")
+        if algo == "bld_metric_ecod":
+            algo_short = "BLD Metric"
+            score_str = f"score={record.get('max_score', 0):.4f}"
+            baseline_str = f"median={record.get('training_median', 0):.1f}"
+        else:
+            algo_short = "3-Sigma"
+            score_str = f"z={record.get('max_z_score', 0):.2f}"
+            baseline_str = (
+                f"μ={record.get('baseline_mean', 0):.1f} "
+                f"σ={record.get('baseline_std', 0):.1f}"
+            )
+
+        if has_bld:
+            parts.append(
+                f"| {i} | {algo_short} | {record['metric']} | {type_cn} | {time_range} | "
+                f"{score_str} | {baseline_str} | "
+                f"{record.get('observation_min', 0):.1f} ~ {record.get('observation_max', 0):.1f} |"
+            )
+        else:
+            parts.append(
+                f"| {i} | {record['metric']} | {type_cn} | {time_range} | "
+                f"{record.get('max_z_score', 0):.2f} | "
+                f"{record.get('baseline_mean', 0):.1f}±{record.get('baseline_std', 0):.1f} | "
+                f"{record.get('observation_min', 0):.1f} ~ {record.get('observation_max', 0):.1f} |"
+            )
 
     # --- Detail section ---
     parts.append("\n### 异常事件详述\n")

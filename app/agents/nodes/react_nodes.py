@@ -274,6 +274,18 @@ def extract_results_node(state: Dict) -> Dict:
                         "iteration": state.get("iteration_count", 0)
                     })
 
+            elif tool_name == "bld_metric_tool":
+                state["bld_metric_result"] = result
+                if result.get("success"):
+                    anomalies = result.get("anomalies", [])
+                    logger.info(f"REACT: BLD Metric found {len(anomalies)} anomalous metrics")
+                else:
+                    state["tool_errors"].append({
+                        "tool": tool_name,
+                        "error": result.get("error", "Unknown error"),
+                        "iteration": state.get("iteration_count", 0)
+                    })
+
             elif tool_name == "rcd_tool" or tool_name == "rcd_algorithm":
                 state["rcd_result"] = result
                 if result.get("success"):
