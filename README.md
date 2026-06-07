@@ -1,199 +1,119 @@
-# AIOps Diagnose Agent
+# AIOps Agent
 
-AIOps 故障诊断 Agent 原型系统，基于 Supervisor-Subagent 架构。
+微服务故障根因分析助手。基于 LangGraph 的四 Agent Plan-and-Execute 架构，支持对话式异常检测与根因定位。
 
-## 功能特性
+## 功能
 
-- **对话式交互**: 支持多轮对话，逐步收集诊断所需信息
-- **Supervisor-Subagent 架构**: Supervisor 负责路由和对话管理，Diagnose Subagent 负责具体的诊断分析
-- **CSV 文件读取**: 通过 LLM Tool Calling 自动调用 CSV 读取工具
-- **DeepSeek LLM 集成**: 使用 DeepSeek 作为默认 LLM（支持切换其他模型）
-- **LangGraph 工作流**: 使用 LangGraph 编排复杂的 Agent 工作流
-- **根因算法**: IAF-RCL（快速根因推理，`rcd_tool`）与 KE-FPC（因果发现，`pc_tool`）
+- **多轮对话**：跨轮次保留 CSV 路径、故障时间、异常 KPI 等上下文
+- **异常检测**：BLD Metric（ECOD 算法）识别异常指标
+- **根因分析**：IAF-RCL（`rcd_tool`）+ KE-FPC（`pc_tool`）推理传播路径
+- **报告生成**：汇总检测与诊断结果，输出自然语言报告
+- **可视化**：故障传播拓扑图与 HTML 报告页面
 
-## 架构说明
+## 架构
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      Main Graph                          │
-├─────────────────────────────────────────────────────────┤
-│                                                           │
-│   User Input                                             │
-│       │                                                   │
-│       ▼                                                   │
-│   ┌─────────────┐                                       │
-│   │ Supervisor  │ ◄─────────────┐                       │
-│   │   Agent     │               │                       │
-│   └──────┬──────┘               │                       │
-│          │                      │                       │
-│          │ 决定                  │                       │
-│          ├──────────────────────┼─────────────────────┤│
-│          │                      │                      ││
-│      信息完整                  信息缺失                 ││
-│          ▼                      ▼                      ││
-│   ┌──────────────┐      ┌──────────────┐            ││
-│   │ Diagnose     │      │ Ask for Info │            ││
-│   │ Subagent     │      │   (Prompt    │            ││
-│   │   (子图)      │      │    User)     │            ││
-│   └──────────────┘      └──────────────┘            ││
-│          │                                            ││
-│          ▼                                            ││
-│   返回诊断结果                                         ││
-│                                                        ││
-└─────────────────────────────────────────────────────────┘
+用户输入 → Supervisor（plan → execute → finalize）
+                ├── Detection Agent   异常检测
+                ├── Diagnose Agent    根因分析
+                └── Report Agent      报告生成
 ```
 
-### 组件说明
-
-1. **Main Graph**: 顶层工作流，协调 Supervisor 和 Subagent
-2. **Supervisor Agent**:
-   - 分析用户输入
-   - 提取诊断所需信息
-   - 判断信息完整性
-   - 决定下一步行动（直接回复 / 调用诊断子图 / 询问更多信息）
-3. **Diagnose Subagent**:
-   - 接收 Supervisor 收集的信息
-   - 使用 LLM + Tool Calling 分析 CSV 数据
-   - 生成诊断报告
+Supervisor 按任务生成执行计划，调度三个子 Agent 完成检测、诊断与报告，最终返回分析结果。
 
 ## 快速开始
 
-### 1. 安装依赖
+**环境要求：** Python 3.10+
 
 ```bash
-pip install -e .
-```
-
-### 2. 配置环境变量
-
-```bash
+# 1. 配置环境变量
 cp .env.example .env
-```
+# 编辑 .env，填入 DEEPSEEK_API_KEY
 
-编辑 `.env` 文件：
-```bash
-# DeepSeek API 配置
-LLM_PROVIDER=deepseek
-DEEPSEEK_API_KEY=your_deepseek_api_key_here
+# 2. 一键安装依赖并启动 LangGraph 调试服务
+./start_langgraph.sh
 
-# 可选：LangSmith 追踪
-LANGCHAIN_TRACING_V2=false
-LANGCHAIN_API_KEY=
-LANGCHAIN_PROJECT=aiops-diagnose-agent
-```
-
-### 3. 运行应用
-
-**交互式对话模式**（推荐）:
-```bash
+# 3. 或手动启动命令行交互模式
+pip install -e . && pip install -r requirements.txt pyod
 python -m app.main
 ```
 
-**单次请求模式**:
+### LangGraph 调试服务
+
+`start_langgraph.sh` 启动后可访问：
+
+| 地址 | 说明 |
+|------|------|
+| http://localhost:2024 | LangGraph API |
+| http://localhost:8123 | LangGraph Studio 可视化界面 |
+| `/topology/latest` | 最新故障传播图 |
+| `/report/latest` | 最新分析报告 |
+
+常用选项：
+
 ```bash
-python -m app.main --request "分析 checkoutservice 的 p99_latency 指标，数据文件 ./data/sample_metrics.csv"
+./start_langgraph.sh --skip-install   # 跳过依赖安装
+./start_langgraph.sh --tunnel         # 开启公网隧道（无需端口映射）
 ```
 
-### 4. 使用示例
+### 命令行模式
+
+```bash
+# 交互式对话
+python -m app.main
+
+# 单次请求
+python -m app.main --request "分析 ./data/sample_metrics.csv 文件的根因"
+```
+
+示例输入：
 
 ```
-============================================================
-AIOps 故障诊断助手 v0.2.0
-============================================================
-
-我可以帮助您分析微服务故障指标。
-请描述您遇到的问题，例如:
-  "checkoutservice 服务的 p99_latency 指标飙升，
-   数据文件在 ./data/sample_metrics.csv"
-
-输入 'quit' 或 'exit' 退出
-============================================================
-
-您: checkoutservice 的 latency 指标有问题
-
-助手: 为了进行故障诊断分析，我还需要以下信息:
-1. CSV 数据文件的路径
-2. 具体的指标名称（如 p99_latency, throughput 等）
-3. 异常类型（飙升、下降、异常等）
-
-您: 数据在 ./data/sample_metrics.csv，p99_latency 指标飙升
-
-助手: 好的，我已收集到诊断所需的信息，正在为您进行分析...
-
-=== 诊断分析报告 ===
-...
+2026年1月5日5:48发生了故障，请检测异常指标
+分析 ./data/RE1-OB/checkoutservice_cpu/1/data.csv 的根因
 ```
+
+## 配置
+
+`.env` 关键项：
+
+```bash
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=your_key_here
+
+# 拓扑图/报告链接前缀（外网访问时改为实际地址）
+LANGGRAPH_PUBLIC_BASE_URL=http://192.168.199.5:32025
+```
+
+切换 LLM 提供商：设置 `LLM_PROVIDER` 为 `deepseek` / `openai` / `anthropic`，并填入对应 API Key。
 
 ## 项目结构
 
 ```
 app/
-├── graph/
-│   ├── state.py              # 状态定义
-│   ├── builder.py            # 主工作流构建器
-│   ├── legacy_builder.py     # 旧版工作流（向后兼容）
-│   ├── supervisor.py         # Supervisor Agent
-│   └── nodes.py              # 传统节点（已废弃）
-│
-├── subagents/
-│   ├── diagnose_subagent.py  # Diagnose Subagent（子图）
-│   └── diagnose_agent.py     # Diagnose Agent（占位）
-│
-├── tools/
-│   ├── langchain_csv_tool.py # LangChain 格式的 CSV 工具
-│   ├── csv_reader_tool.py    # 传统 CSV 工具
-│   ├── rcd_wrapper.py        # IAF-RCL 算法封装
-│   └── pc_wrapper.py         # KE-FPC 算法封装
-│
-├── models/
-│   ├── base.py               # LLM 基础接口
-│   ├── deepseek.py           # DeepSeek 实现
-│   └── model_factory.py      # 模型工厂
-│
-├── config/
-│   ├── settings.py           # 应用配置
-│   └── model_config.py       # 模型配置
-│
-├── prompts/
-│   └── diagnose_prompt.py    # Prompt 模板
-│
-├── utils/                    # 工具函数
-└── main.py                   # 应用入口
+├── agents/          # Supervisor + 子 Agent 图定义
+├── middleware/      # LLM 重试、循环检测、会话上下文等
+├── tools/           # CSV 读取、BLD Metric、RCD、PC、拓扑可视化
+├── prompts/         # 各 Agent 的 Prompt 模板
+├── config/          # agents.yaml、tools.yaml 配置
+├── models/          # 状态定义与 LLM 工厂
+└── main.py          # CLI 入口
+
+data/                # 示例与测试数据集
+start_langgraph.sh   # 一键启动脚本
+langgraph.json       # LangGraph 服务配置
 ```
 
-## 模型配置
-
-项目支持多种 LLM 提供商，通过 `LLM_PROVIDER` 环境变量切换：
+## 测试
 
 ```bash
-# DeepSeek（默认）
-LLM_PROVIDER=deepseek
-DEEPSEEK_API_KEY=your_key
-
-# OpenAI
-LLM_PROVIDER=openai
-OPENAI_API_KEY=your_key
-
-# Anthropic
-LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=your_key
+pytest tests/
 ```
 
-## LangGraph Studio
+## 数据说明
 
-使用 LangGraph Studio 可视化调试：
-
-```bash
-langgraph dev
-```
-
-然后访问 http://localhost:8123 查看工作流图。
-
-## 后续计划
-
-- [x] 实现 IAF-RCL 算法工具（rcd_tool）
-- [x] 实现 KE-FPC 算法工具（pc_tool）
-- [ ] 增强 Supervisor 的意图识别
-- [ ] 支持多服务关联分析
-- [ ] 添加更多诊断 Subagent
-- [ ] 支持流式输出
+| 路径 | 说明 |
+|------|------|
+| `data/sample_metrics.csv` | 简单示例 |
+| `data/RE1-OB/*/data.csv` | RE1-OB 故障数据集 |
+| `data/ZH_dataset/*/data.csv` | ZH 数据集 |
