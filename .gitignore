@@ -57,3 +57,4 @@ data/*.csv
 /data/
 /docs/
 /utils/deer-flow/
+/RCAEval/

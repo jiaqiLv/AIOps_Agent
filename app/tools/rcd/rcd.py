@@ -1,3 +1,4 @@
+import logging
 import time
 import warnings
 
@@ -6,8 +7,10 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from causallearn.utils.cit import chisq
-from causallearn.utils.PCUtils import SkeletonDiscovery
 from sklearn.preprocessing import KBinsDiscretizer
+
+# Use patched skeleton discovery (adds local_skeleton_discovery and CI test caching)
+from ._skeleton import skeleton_discovery, local_skeleton_discovery
 
 # Fix relative import issue
 try:
@@ -18,6 +21,8 @@ except ImportError:
 
 warnings.filterwarnings("ignore")
 plt.style.use("fivethirtyeight")
+
+logger = logging.getLogger(__name__)
 
 
 # =========== UTILS.py ====================
@@ -75,15 +80,17 @@ def add_fnode_and_concat(normal_df, anomalous_df):
 # Run PC (only the skeleton phase) on the given dataset.
 # The last column of the data *must* be the F-node
 def run_pc(data, alpha, localized=False, labels={}, mi=[], verbose=VERBOSE):
+    t0 = time.time()
     if labels == {}:
         labels = {i: name for i, name in enumerate(data.columns)}
 
     np_data = data.to_numpy()
+    logger.info("[RCD.run_pc] Starting PC skeleton discovery: %d rows x %d cols, alpha=%.3f, localized=%s",
+                np_data.shape[0], np_data.shape[1], alpha, localized)
 
-    # Use localized PC only if causallearn supports it (older versions)
-    if localized and hasattr(SkeletonDiscovery, 'local_skeleton_discovery'):
+    if localized:
         f_node = np_data.shape[1] - 1
-        cg = SkeletonDiscovery.local_skeleton_discovery(
+        cg = local_skeleton_discovery(
             np_data,
             f_node,
             alpha,
@@ -93,36 +100,24 @@ def run_pc(data, alpha, localized=False, labels={}, mi=[], verbose=VERBOSE):
             verbose=verbose,
         )
     else:
-        # Newer causallearn API requires CIT object instead of raw function
-        from causallearn.utils.cit import Chisq_or_Gsq
-        cit = Chisq_or_Gsq(np_data, 'chisq')
-        node_names = list(labels.values())
-
-        cg = SkeletonDiscovery.skeleton_discovery(
+        cg = skeleton_discovery(
             np_data,
             alpha,
-            indep_test=cit,
+            indep_test=CI_TEST,
             background_knowledge=None,
             stable=False,
-            verbose=False,
-            node_names=node_names,
+            verbose=verbose,
+            labels=labels,
             show_progress=False,
         )
 
     cg.to_nx_graph()
+    logger.info("[RCD.run_pc] PC done in %.2fs, CI tests=%d", time.time() - t0, cg.no_ci_tests)
     return cg
 
 
 def get_fnode_child(G):
-    # Older causallearn: nodes are string labels, F-node is "F-node"
-    if F_NODE in G.nodes():
-        return [*G.successors(F_NODE)]
-    # Newer causallearn: nodes are integer indices, F-node is the max index
-    nodes = list(G.nodes())
-    if nodes and all(isinstance(n, (int, np.integer)) for n in nodes):
-        f_node_idx = max(nodes)
-        return [*G.successors(f_node_idx)]
-    return []
+    return [*G.successors(F_NODE)]
 
 
 def save_graph(graph, file):
@@ -147,8 +142,11 @@ def run_psi_pc(
     min_nodes=-1,
     verbose=VERBOSE,
 ):
+    t0 = time.time()
+    logger.info("[RCD.run_psi_pc] Starting: normal=%d rows x %d cols, anomalous=%d rows x %d cols, min_nodes=%d",
+                len(normal_df), len(normal_df.columns), len(anomalous_df), len(anomalous_df.columns), min_nodes)
     """
-    Run \Psi-PC on the given dataset.
+    Run Psi-PC on the given dataset.
     The last column of the data *must* be the F-node
 
     Parameters
@@ -205,39 +203,31 @@ def run_psi_pc(
 
     rc = []
     _alpha = START_ALPHA if start_alpha is None else start_alpha
+    alpha_iter = 0
     for i in np.arange(_alpha, ALPHA_LIMIT, ALPHA_STEP):
+        alpha_iter += 1
+        logger.info("[RCD.run_psi_pc] Alpha iteration %d: alpha=%.3f, rc_so_far=%d", alpha_iter, i, len(rc))
         cg = _run_pc(i)
         G = cg.nx_graph
-        no_ci += getattr(cg, 'no_ci_tests', 0)
+        no_ci += cg.no_ci_tests
 
         if G is None:
             continue
 
         f_neigh = get_fnode_child(G)
-        # Convert node indices to label strings (newer causallearn uses integer indices)
-        if f_neigh and isinstance(next(iter(f_neigh)), (int, np.integer)):
-            f_neigh_labels = [i_to_labels.get(n, n) for n in f_neigh]
-        else:
-            f_neigh_labels = f_neigh
-
-        new_neigh = [x for x in f_neigh_labels if x not in rc]
+        new_neigh = [x for x in f_neigh if x not in rc]
         if len(new_neigh) == 0:
             continue
         else:
-            p_values = getattr(cg, 'p_values', None)
-            if p_values is not None:
-                # Map new_neigh labels back to indices for p_values lookup
-                new_neigh_indices = [labels_to_i.get(key) for key in new_neigh]
-                f_p_values = p_values[-1][new_neigh_indices]
-                rc += _order_neighbors(new_neigh, f_p_values)
-            else:
-                # Fallback: add neighbors without ordering by p-values
-                rc += [n for n in new_neigh if n != F_NODE]
+            f_p_values = cg.p_values[-1][[labels_to_i.get(key) for key in new_neigh]]
+            rc += _order_neighbors(new_neigh, f_p_values)
 
         if len(rc) == min_nodes:
             break
 
-    return (rc, G, _postprocess_mi(getattr(cg, 'mi', [])), no_ci)
+    logger.info("[RCD.run_psi_pc] Done in %.2fs: %d alpha iters, %d root causes found, %d CI tests",
+                time.time() - t0, alpha_iter, len(rc), no_ci)
+    return (rc, G, _postprocess_mi(cg.mi), no_ci)
 
 
 def _order_neighbors(neigh, p_values):
@@ -303,13 +293,15 @@ def _scale_down_mem(df):
 # Select all the non-latency columns and only select latecy columns
 # with given percentaile
 def _select_lat(df, per):
-    return df.filter(regex=(".*(?<!lat_\d{2})$|_lat_" + str(per) + "$"))
+    return df.filter(regex=(r".*(?<!lat_\d{2})$|_lat_" + str(per) + "$"))
 
 
 # NOTE: THIS FUNCTION THROWS WARNGINGS THAT ARE SILENCED!
 def _discretize(data, bins):
+    t0 = time.time()
     d = data.iloc[:, :-1]
-    discretizer = KBinsDiscretizer(n_bins=bins, encode="ordinal", strategy="kmeans", random_state=42)
+    logger.info("[RCD._discretize] Fitting KBinsDiscretizer on %d rows x %d cols, bins=%d", len(d), len(d.columns), bins)
+    discretizer = KBinsDiscretizer(n_bins=bins, encode="ordinal", strategy="kmeans")
     discretizer.fit(d)
     disc_d = discretizer.transform(d)
     disc_d = pd.DataFrame(disc_d, columns=d.columns.values.tolist())
@@ -318,6 +310,7 @@ def _discretize(data, bins):
     for c in disc_d:
         disc_d[c] = disc_d[c].astype(int)
 
+    logger.info("[RCD._discretize] Done in %.2fs", time.time() - t0)
     return disc_d
 
 
@@ -344,6 +337,7 @@ def create_chunks(df, gamma):
 
     if len(chunks[-1]) == 0:
         chunks.pop()
+    logger.info("[RCD.create_chunks] %d cols -> %d chunks (gamma=%d)", len(df.columns), len(chunks), gamma)
     return chunks
 
 
@@ -375,15 +369,17 @@ def run_level(normal_df, anomalous_df, gamma, localized, bins, verbose):
     ci_tests : int
         Number of conditional independence tests
     """
+    t0 = time.time()
     ci_tests = 0
     chunks = create_chunks(normal_df, gamma)
-    if verbose:
-        print(f"Created {len(chunks)} subsets")
+    logger.info("[RCD.run_level] Starting phase-1 level: %d cols -> %d chunks", len(normal_df.columns), len(chunks))
 
     f_child_union = []
     mi_union = []
     f_child = []
-    for c in chunks:
+    for idx, c in enumerate(chunks):
+        logger.info("[RCD.run_level] Chunk %d/%d: %d cols %s", idx + 1, len(chunks), len(c), list(c))
+        tc0 = time.time()
         # Try this segment with multiple values of alpha until we find at least one node
         rc, _, mi, ci = run_psi_pc(
             normal_df.loc[:, c],
@@ -394,6 +390,8 @@ def run_level(normal_df, anomalous_df, gamma, localized, bins, verbose):
             min_nodes=1,
             verbose=verbose,
         )
+        logger.info("[RCD.run_level] Chunk %d/%d done in %.2fs, found %d root causes: %s",
+                    idx + 1, len(chunks), time.time() - tc0, len(rc), rc)
         f_child_union += rc
         mi_union += mi
         ci_tests += ci
@@ -404,6 +402,8 @@ def run_level(normal_df, anomalous_df, gamma, localized, bins, verbose):
         print(f"Output of individual chunk {f_child}")
         print(f"Total nodes in mi => {len(mi_union)} | {mi_union}")
 
+    logger.info("[RCD.run_level] Phase-1 level done in %.2fs: %d candidates total, %d CI tests",
+                time.time() - t0, len(f_child_union), ci_tests)
     return f_child_union, mi_union, ci_tests
 
 
@@ -432,14 +432,20 @@ def run_multi_phase(normal_df, anomalous_df, gamma, localized, bins, verbose):
     rc : list
         List of root causes
     """
+    t_total = time.time()
+    logger.info("[RCD.run_multi_phase] Starting: normal=%d rows x %d cols, anomalous=%d rows x %d cols, gamma=%d",
+                len(normal_df), len(normal_df.columns), len(anomalous_df), len(anomalous_df.columns), gamma)
+
     f_child_union = normal_df.columns
     mi_union = []
     i = 0
     prev = len(f_child_union)
 
     # Phase-1
+    logger.info("[RCD.run_multi_phase] === Phase-1 START ===")
     while True:
         start = time.time()
+        logger.info("[RCD.run_multi_phase] Phase-1 Level-%d: %d variables to process", i, len(f_child_union))
         f_child_union, mi, ci_tests = run_level(
             normal_df.loc[:, f_child_union],
             anomalous_df.loc[:, f_child_union],
@@ -448,6 +454,8 @@ def run_multi_phase(normal_df, anomalous_df, gamma, localized, bins, verbose):
             bins,
             verbose,
         )
+        elapsed = time.time() - start
+        logger.info("[RCD.run_multi_phase] Phase-1 Level-%d done in %.2fs: %d candidates remain", i, elapsed, len(f_child_union))
         if verbose:
             print(f"Level-{i}: variables {len(f_child_union)} | time {time.time() - start}")
         i += 1
@@ -461,7 +469,11 @@ def run_multi_phase(normal_df, anomalous_df, gamma, localized, bins, verbose):
             break
         prev = len(f_child_union)
 
+    logger.info("[RCD.run_multi_phase] === Phase-1 END: %d levels, %d candidates ===", i, len(f_child_union))
+
     # Phase-2
+    logger.info("[RCD.run_multi_phase] === Phase-2 START: %d variables ===", len(f_child_union))
+    t_p2 = time.time()
     mi_union = []
     new_nodes = f_child_union
     rc, _, mi, ci = run_psi_pc(
@@ -473,7 +485,9 @@ def run_multi_phase(normal_df, anomalous_df, gamma, localized, bins, verbose):
         verbose=verbose,
     )
     ci_tests += ci
+    logger.info("[RCD.run_multi_phase] === Phase-2 END in %.2fs: %d root causes ===", time.time() - t_p2, len(rc))
 
+    logger.info("[RCD.run_multi_phase] TOTAL done in %.2fs. Root causes: %s", time.time() - t_total, rc)
     # return rc, ci_tests
     return rc
 
@@ -490,11 +504,16 @@ def rcd(
     seed=None,
     **kwargs,
 ):
+    t_total = time.time()
+    logger.info("[RCD] ========== RCD START ==========")
+    logger.info("[RCD] Input data: %d rows x %d cols", len(data), len(data.columns))
+
     # Remove duplicate columns (keep first occurrence)
     dup_cols = data.columns[data.columns.duplicated()].unique().tolist()
     if dup_cols:
-        print(f"[RCD] Removing {len(dup_cols)} duplicate column(s): {dup_cols}")
+        logger.info("[RCD] Removing %d duplicate column(s): %s", len(dup_cols), dup_cols)
         data = data.loc[:, ~data.columns.duplicated()]
+    logger.info("[RCD] After dedup: %d cols", len(data.columns))
 
     normal_df = data[data["time"] < inject_time]
     anomal_df = data[data["time"] >= inject_time]
@@ -503,15 +522,21 @@ def rcd(
     if "time" in normal_df.columns:
         normal_df = normal_df.drop(columns=["time"])
         anomal_df = anomal_df.drop(columns=["time"])
+    logger.info("[RCD] Split data: normal=%d rows, anomalous=%d rows, metric cols=%d",
+                len(normal_df), len(anomal_df), len(normal_df.columns))
 
     if dk_select_useful is True:
+        logger.info("[RCD] Applying drop_extra filter")
         normal_df = drop_extra(normal_df)
         anomal_df = drop_extra(anomal_df)
+        logger.info("[RCD] After drop_extra: %d metric cols", len(normal_df.columns))
 
     # if dataset == real outages:
     if dataset == "sock-shop":
+        logger.info("[RCD] Applying sock-shop preprocessing")
         normal_df, anomal_df = preprocess_sock_shop(normal_df, anomal_df, 90, dk_select_useful)
     elif dataset is not None:
+        logger.info("[RCD] Applying dataset=%s preprocessing", dataset)
         from .time_series import convert_mem_mb, drop_constant, drop_time, preprocess
 
         normal_df = drop_constant(convert_mem_mb(drop_time(normal_df)))
@@ -526,10 +551,15 @@ def rcd(
         normal_df = df[df[F_NODE] == "0"].drop(columns=[F_NODE])
         anomal_df = df[df[F_NODE] == "1"].drop(columns=[F_NODE])
 
+    logger.info("[RCD] Final data for analysis: normal=%d rows x %d cols, anomalous=%d rows x %d cols",
+                len(normal_df), len(normal_df.columns), len(anomal_df), len(anomal_df.columns))
+    logger.info("[RCD] Metric columns: %s", list(normal_df.columns))
+
     # Always set seed for reproducibility (default 42)
     np.random.seed(seed if seed is not None else 42)
 
     rc = run_multi_phase(normal_df, anomal_df, gamma, localized, bins, verbose)
+    logger.info("[RCD] ========== RCD END in %.2fs. Root causes: %s ==========", time.time() - t_total, rc)
     # return rc
     return {
         "ranks": rc,
